@@ -32,8 +32,10 @@ End a line with \\ to continue typing on the next line. Ctrl+C cancels the curre
 
 def keys_table(pool: KeyPool) -> Table:
     table = Table(box=None, pad_edge=False, header_style="bold")
-    for column in ("key", "provider", "model", "status", "minute", "day", "requests today", "tokens today", "note"):
-        table.add_column(column, overflow="fold")
+    # Short headers and no-wrap identifiers keep the table readable at 80 columns.
+    for column in ("key", "provider", "model", "status", "min", "day", "req/day", "tok/day"):
+        table.add_column(column, no_wrap=True)
+    table.add_column("note", overflow="fold")
     for row in pool.snapshot():
         style = _STATUS_STYLE.get(row["status"], "white")
         note = f"retry in {int(row['retry_in'])}s" if row["retry_in"] else ""
@@ -41,7 +43,8 @@ def keys_table(pool: KeyPool) -> Table:
             note = (note + "  " + row["last_error"]).strip()
         key = pool.keys[row["id"]]
         table.add_row(
-            row["id"], row["provider"], row["model"], f"[{style}]{row['status']}[/]",
+            row["id"], row["provider"].replace("openai_compatible", "compatible"), row["model"],
+            f"[{style}]{row['status']}[/]",
             f"{min(pool.short_utilization(key), 9.99):.0%}", f"{row['daily_utilization']:.0%}",
             str(row["requests_today"]), f"{row['tokens_today']:,}", escape(note[:70]),
         )

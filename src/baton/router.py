@@ -289,6 +289,10 @@ class Router:
                             if on_route is not None:
                                 on_route(RouteInfo(key.id, key.config.provider, model, attempts))
                         yield chunk
+                    elif committed and chunk.usage is not None:
+                        # OpenAI-style streams send usage in a trailing chunk
+                        # with no content; callers still need it.
+                        yield chunk
                 finished = True
             except asyncio.CancelledError:
                 raise

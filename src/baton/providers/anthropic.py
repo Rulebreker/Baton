@@ -235,7 +235,7 @@ class AnthropicProvider(Provider):
             async with self.client.stream("POST", url, headers=self._headers(api_key), json=payload) as response:
                 await raise_for_status(self.name, response)
                 yield StreamChunk(rate=parse_rate_headers(response.headers))
-                async for _event, data in iter_sse(response):
+                async for _event, data in iter_sse(response):  # runs to the end of the body; no early exit
                     event = loads_or_error(self.name, data)
                     kind = event.get("type")
                     if kind == "message_start":

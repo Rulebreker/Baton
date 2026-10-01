@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -123,24 +124,25 @@ class OpenAICompatProvider(Provider):
                         raise
                     rate = parse_rate_headers(response.headers)
                     first = True
-                    async for _event, data in iter_sse(response):
-                        if data.strip() == "[DONE]":
-                            break
-                        parsed = loads_or_error(self.name, data)
-                        if "error" in parsed and not parsed.get("choices"):
-                            error = parsed["error"]
-                            text = error.get("message") if isinstance(error, dict) else str(error)
-                            raise ProviderError(ErrorKind.TRANSIENT, f"{self.name} stream error: {str(text)[:300]}")
-                        chunk = StreamChunk(usage=_usage(parsed.get("usage")))
-                        if first:
-                            chunk.rate, first = rate, False
-                        choices = parsed.get("choices") or []
-                        if choices:
-                            delta = choices[0].get("delta") or {}
-                            chunk.text = delta.get("content") or ""
-                            chunk.tool_calls = list(delta.get("tool_calls") or [])
-                            chunk.finish_reason = choices[0].get("finish_reason")
-                        yield chunk
+                    async with contextlib.aclosing(iter_sse(response)) as events:
+                        async for _event, data in events:
+                            if data.strip() == "[DONE]":
+                                break
+                            parsed = loads_or_error(self.name, data)
+                            if "error" in parsed and not parsed.get("choices"):
+                                error = parsed["error"]
+                                text = error.get("message") if isinstance(error, dict) else str(error)
+                                raise ProviderError(ErrorKind.TRANSIENT, f"{self.name} stream error: {str(text)[:300]}")
+                            chunk = StreamChunk(usage=_usage(parsed.get("usage")))
+                            if first:
+                                chunk.rate, first = rate, False
+                            choices = parsed.get("choices") or []
+                            if choices:
+                                delta = choices[0].get("delta") or {}
+                                chunk.text = delta.get("content") or ""
+                                chunk.tool_calls = list(delta.get("tool_calls") or [])
+                                chunk.finish_reason = choices[0].get("finish_reason")
+                            yield chunk
                     return
             except httpx.HTTPError as exc:
                 raise classify_transport_error(self.name, exc) from None

@@ -8,6 +8,7 @@ adapter only has to translate to and from it.
 
 from __future__ import annotations
 
+import contextlib
 import email.utils
 import json
 import re
@@ -291,17 +292,21 @@ async def raise_for_status(provider: str, response: httpx.Response) -> None:
 async def iter_sse(response: httpx.Response) -> AsyncIterator[tuple[str, str]]:
     """Yield (event, data) pairs from a server-sent-events body."""
     event, data_lines = "", []
-    async for line in response.aiter_lines():
-        if line == "":
-            if data_lines:
-                yield event, "\n".join(data_lines)
-            event, data_lines = "", []
-        elif line.startswith(":"):
-            continue  # comment / keep-alive
-        elif line.startswith("event:"):
-            event = line[6:].strip()
-        elif line.startswith("data:"):
-            data_lines.append(line[5:].lstrip(" "))
+    # aclosing: when a consumer stops early (e.g. at "[DONE]") the underlying
+    # line iterator is closed deterministically instead of by the garbage
+    # collector at some later, possibly loop-less, moment.
+    async with contextlib.aclosing(response.aiter_lines()) as lines:
+        async for line in lines:
+            if line == "":
+                if data_lines:
+                    yield event, "\n".join(data_lines)
+                event, data_lines = "", []
+            elif line.startswith(":"):
+                continue  # comment / keep-alive
+            elif line.startswith("event:"):
+                event = line[6:].strip()
+            elif line.startswith("data:"):
+                data_lines.append(line[5:].lstrip(" "))
     if data_lines:
         yield event, "\n".join(data_lines)
 

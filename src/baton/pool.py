@@ -17,6 +17,7 @@ reactions:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import random
@@ -119,6 +120,7 @@ class KeyPool:
         self.state_path = state_path
         self._last_save = 0.0
         self._dirty = False
+        self._flush_pending = False
         self.keys: dict[str, KeyState] = {}
         for order, key_config in enumerate(config.keys):
             secret = secrets.get(key_config.id)
@@ -404,6 +406,11 @@ class KeyPool:
             return
         now = self.clock()
         if not force and now - self._last_save < _SAVE_INTERVAL:
+            # Debounced: a busy proxy must not fsync on every request. But the
+            # *last* change of a burst must still reach the disk, or a hard
+            # kill would forget today's usage and the keys would be overspent
+            # after restart. So schedule one trailing flush.
+            self._schedule_flush()
             return
         data = {
             "version": 1,
@@ -426,6 +433,21 @@ class KeyPool:
         except OSError as exc:
             # Losing counters is survivable; crashing a request over it is not.
             log.warning("could not persist usage state (%s)", type(exc).__name__)
+
+    def _schedule_flush(self) -> None:
+        if self._flush_pending:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # no event loop (plain synchronous use): the next save() or aclose() writes it
+        self._flush_pending = True
+
+        def flush() -> None:
+            self._flush_pending = False
+            self.save(force=True)
+
+        loop.call_later(_SAVE_INTERVAL, flush)
 
     def _load_state(self) -> None:
         if self.state_path is None or not self.state_path.is_file():
