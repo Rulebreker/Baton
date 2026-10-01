@@ -23,6 +23,7 @@ dependencies = [
     "PyYAML>=6.0,<7",
     "cryptography>=42",
     "rich>=13.7",
+    "questionary>=2.0",
     "typer>=0.12",
     "starlette>=0.37",
     "uvicorn>=0.29",

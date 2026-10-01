@@ -30,8 +30,8 @@ def home(tmp_path, monkeypatch):
 
 def run_init():
     answers = [
-        "2",                        # vault protection: keyfile
-        "openai_compatible",        # provider
+        "2",                        # vault protection: no password (keyfile)
+        "openai_compatible",        # provider (the option's number or its value)
         "",                         # key name (default)
         "http://127.0.0.1:9/v1",    # base URL
         "test-model",               # model
@@ -39,9 +39,18 @@ def run_init():
         CREDENTIAL,                 # API key (stdin, hidden prompt in a real terminal)
         "n",                        # add another?
         "n",                        # test now?
-        "y",                        # create proxy token?
     ]
-    return runner.invoke(app, ["init"], input="\n".join(answers) + "\n")
+    result = runner.invoke(app, ["init", "--advanced"], input="\n".join(answers) + "\n")
+    assert result.exit_code == 0, result.output
+    return result
+
+
+def run_setup():
+    """The wizard, then the proxy token (`init` no longer creates one)."""
+    result = run_init()
+    created = runner.invoke(app, ["token", "new", "default"])
+    assert created.exit_code == 0, created.output
+    return result, created.output
 
 
 def test_version():
@@ -50,10 +59,9 @@ def test_version():
 
 
 def test_init_wizard_creates_vault_config_and_token(home):
-    result = run_init()
-    assert result.exit_code == 0, result.output
+    result, token_output = run_setup()
     assert "Setup complete" in result.output
-    token = re.search(r"baton-[A-Za-z0-9_\-]{30,}", result.output)
+    token = re.search(r"baton-[A-Za-z0-9_\-]{30,}", token_output)
     assert token, "the proxy token must be shown once"
 
     config = load_config(home / "config.yaml")
@@ -68,8 +76,19 @@ def test_init_wizard_creates_vault_config_and_token(home):
     assert vault.verify_token(token.group(0)) == "default"
 
 
+def test_simple_wizard_only_asks_for_provider_and_key(home):
+    answers = ["2", "1", CREDENTIAL, "n", "n"]   # no password, Gemini (option 1), key, no more keys, no test
+    result = runner.invoke(app, ["init"], input="\n".join(answers) + "\n")
+    assert result.exit_code == 0, result.output
+    assert "Default model" not in result.output and "Requests per" not in result.output
+    key = load_config(home / "config.yaml").keys[0]
+    assert (key.id, key.provider) == ("gemini-1", "gemini")
+    assert key.models[0] == "gemini-2.5-flash" and len(key.models) > 1      # extra models feed the /model menu
+    assert CREDENTIAL not in result.output
+
+
 def test_commands_after_setup(home):
-    assert run_init().exit_code == 0
+    run_setup()
 
     listed = runner.invoke(app, ["keys", "list"])
     assert listed.exit_code == 0 and "openai-compatible-1" in listed.output and CREDENTIAL not in listed.output

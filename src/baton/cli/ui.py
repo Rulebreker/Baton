@@ -23,7 +23,7 @@ HELP = """[bold]Commands[/]
   /status            key pool status and quota usage
   /handoff           summarise the conversation now and continue from the summary
   /clear             start a new conversation
-  /model NAME        switch model (or 'auto')
+  /model             pick a model from a list (or `/model NAME`; 'auto' uses each key's default)
   /approval MODE     ask | auto_edit | auto
   /exit              quit (Ctrl+D also works)
 

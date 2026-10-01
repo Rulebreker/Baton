@@ -62,8 +62,9 @@ pip install -e .
 baton init
 ```
 
-`baton init` is a wizard. It creates an encrypted vault, asks for your keys one at a time (input is
-hidden), optionally tests each key with one tiny request, and creates a token for the proxy. Then:
+`baton init` is a short wizard. You pick how to protect the vault and your provider from a list (arrow keys
+and Enter), then paste the API key (input is hidden) and optionally test it with one tiny request. Key
+name, models and quota limits are chosen for you; add `--advanced` to set them yourself. Then:
 
 ```text
 baton                 start the agent in the current directory
@@ -102,7 +103,7 @@ altogether (only in a throwaway environment).
 | `/status` | key pool table with per-minute and per-day usage |
 | `/handoff` | summarise the conversation now and continue from the summary |
 | `/clear` | start a new conversation |
-| `/model NAME` | switch model or alias; `auto` uses each key's default |
+| `/model` | pick a model from a list with the arrow keys (or `/model NAME`; `auto` uses each key's default) |
 | `/approval MODE` | `ask`, `auto_edit` or `auto` |
 | `/exit` | quit (Ctrl+D also works). Ctrl+C cancels the current turn only |
 

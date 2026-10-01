@@ -12,7 +12,6 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
-import click
 import typer
 from rich.console import Console
 from rich.markup import escape
@@ -32,11 +31,12 @@ from ..errors import AllKeysExhaustedError, BatonError, ConfigError, ProviderErr
 from ..logging_setup import setup_logging
 from ..paths import baton_home, ensure_private_dir
 from ..pool import clear_parked_state
-from ..providers import PROVIDER_DEFAULTS
+from ..providers import PROVIDER_DEFAULTS, SUGGESTED_MODELS
 from ..providers.base import ChatRequest
 from ..redact import scrub
 from ..runtime import Runtime
 from ..vault import MIN_PASSPHRASE_LENGTH, PASSPHRASE_ENV, VAULT_FILE, Vault
+from .select import can_use_menu, choose
 
 log = logging.getLogger("baton.cli")
 console = Console()
@@ -51,7 +51,12 @@ token_app = typer.Typer(help="Manage client tokens for the local proxy endpoint.
 app.add_typer(keys_app, name="keys")
 app.add_typer(token_app, name="token")
 
-PROVIDERS = list(PROVIDER_DEFAULTS)
+PROVIDER_CHOICES = [
+    ("gemini", "Google Gemini"),
+    ("openai", "OpenAI"),
+    ("anthropic", "Anthropic Claude"),
+    ("openai_compatible", "Other (Groq, OpenRouter, Ollama, LM Studio, ...)"),
+]
 
 
 # --- shared helpers ---------------------------------------------------------
@@ -145,26 +150,45 @@ def read_secret_key() -> str:
     return sys.stdin.readline().strip()
 
 
-def add_key_interactive(config: BatonConfig, vault: Vault) -> KeyConfig | None:
-    provider = typer.prompt("Provider", type=click.Choice(PROVIDERS), default="gemini")
+def unique_key_id(config: BatonConfig, provider: str) -> str:
+    stem = provider.replace("_", "-")
+    number = sum(1 for key in config.keys if key.provider == provider) + 1
+    while config.key(f"{stem}-{number}") is not None:
+        number += 1
+    return f"{stem}-{number}"
+
+
+def add_key_interactive(config: BatonConfig, vault: Vault, *, advanced: bool = False) -> KeyConfig | None:
+    """Ask for the provider and the key. The name, model list and quota limits are chosen
+    automatically unless `advanced` is set (or the provider has no built-in defaults)."""
+    provider = choose("Which provider is this key for?", PROVIDER_CHOICES, default="gemini")
     defaults = PROVIDER_DEFAULTS[provider]
-    count = sum(1 for key in config.keys if key.provider == provider) + 1
-    key_id = typer.prompt("Name for this key", default=f"{provider.replace('_', '-')}-{count}").strip().lower()
+    key_id = unique_key_id(config, provider)
+    if advanced:
+        key_id = typer.prompt("Name for this key", default=key_id).strip().lower()
     base_url = None
     if defaults.base_url is None:
         base_url = typer.prompt("Base URL (e.g. https://api.groq.com/openai/v1)").strip()
-    model = typer.prompt("Default model", default=defaults.model or None).strip()
-    console.print("[dim]Quota limits let Baton hand off *before* a key runs dry. Leave blank if unknown;\n"
-                  "Baton then relies on provider headers and 429 responses.[/]")
-    limits = Limits(
-        rpm=prompt_optional_int("  Requests per minute"),
-        rpd=prompt_optional_int("  Requests per day"),
-        tpm=prompt_optional_int("  Tokens per minute"),
-        tpd=prompt_optional_int("  Tokens per day"),
-    )
+        models = [typer.prompt("Model name (e.g. llama-3.3-70b-versatile)").strip()]
+    else:
+        models = list(SUGGESTED_MODELS.get(provider) or [defaults.model])
+        if advanced:
+            models = [typer.prompt("Default model", default=models[0]).strip(), *models[1:]]
+    limits = Limits()
+    if advanced:
+        console.print("[dim]Quota limits let Baton hand off *before* a key runs dry. Leave blank if unknown;\n"
+                      "Baton then relies on provider headers and 429 responses.[/]")
+        limits = Limits(
+            rpm=prompt_optional_int("  Requests per minute"),
+            rpd=prompt_optional_int("  Requests per day"),
+            tpm=prompt_optional_int("  Tokens per minute"),
+            tpd=prompt_optional_int("  Tokens per day"),
+        )
     secret = read_secret_key()
+    model = models[0]
     try:
-        key = KeyConfig(id=key_id, provider=provider, base_url=base_url, models=[model], limits=limits)
+        key = KeyConfig(id=key_id, provider=provider, base_url=base_url, models=list(dict.fromkeys(models)),
+                        limits=limits)
         if config.key(key.id) is not None:
             raise ValueError(f"a key named '{key.id}' already exists")
         vault.set_key(key.id, secret, host=urlparse(str(key.base_url)).hostname)
@@ -208,8 +232,11 @@ def root(
 # --- init -------------------------------------------------------------------
 
 @app.command()
-def init(ctx: typer.Context) -> None:
-    """First-run wizard: create the encrypted vault, add keys, create a proxy token."""
+def init(
+    ctx: typer.Context,
+    advanced: bool = typer.Option(False, "--advanced", help="Also ask for a key name, default model and quota limits."),
+) -> None:
+    """First-run wizard: create the encrypted vault and add your first key."""
     home = prepare_environment()
     path = config_path(ctx)
     console.print(f"[bold]Baton setup[/]\nData directory: {escape(str(home))}\nConfig file:    {escape(str(path))}\n")
@@ -227,13 +254,12 @@ def init(ctx: typer.Context) -> None:
     if vault_path.is_file():
         vault = open_vault(home)
     else:
-        console.print("[bold]How should the key vault be protected?[/]\n"
-                      "  1) Passphrase  - strongest; you type it when Baton starts (recommended)\n"
-                      "  2) Keyfile     - no prompt; the vault key is stored in the OS keychain when available,\n"
-                      "                   otherwise in a private file next to the vault\n")
-        choice = typer.prompt("Choice", type=click.Choice(["1", "2"]), default="1")
+        choice = choose("How should your keys be protected?", [
+            ("passphrase", "Passphrase - strongest; you type it each time Baton starts (recommended)"),
+            ("keyfile", "No password - nothing to type; the key is kept in the OS keychain or a private file"),
+        ])
         try:
-            if choice == "1":
+            if choice == "passphrase":
                 while True:
                     passphrase = typer.prompt(f"New passphrase (min {MIN_PASSPHRASE_LENGTH} chars)", hide_input=True,
                                               confirmation_prompt=True)
@@ -248,10 +274,10 @@ def init(ctx: typer.Context) -> None:
         console.print("[green]Vault created.[/]\n")
     assert vault is not None  # noqa: S101 - open_vault exits on failure
 
-    console.print("[bold]Add API keys[/] (as many as you like; free-tier keys from several accounts are fine)")
+    console.print("[bold]Add an API key[/] (you can add more later with `baton keys add`)")
     added: list[KeyConfig] = []
     while True:
-        key = add_key_interactive(config, vault)
+        key = add_key_interactive(config, vault, advanced=advanced)
         if key:
             added.append(key)
             save_config(path, config)  # save after each key: an interrupted wizard loses nothing
@@ -275,26 +301,24 @@ def init(ctx: typer.Context) -> None:
 
         asyncio.run(run_tests())
 
-    if not vault.token_names() and typer.confirm("\nCreate a token for the local proxy endpoint?", default=True):
-        token = vault.create_token("default")
-        console.print("\nProxy token (shown [bold]once[/]; store it in your app's environment):\n")
-        console.print(f"    {token}\n", markup=False, highlight=False)
-
     save_config(path, config)
     console.print("[green]Setup complete.[/] Next:\n"
-                  "  baton            start the terminal agent in the current directory\n"
-                  "  baton serve      start the OpenAI-compatible endpoint on http://127.0.0.1:8787/v1\n"
-                  "  baton status     show key health and quota usage")
+                  "  baton                  start the terminal agent in the current directory\n"
+                  "  baton token new NAME   create a token, then `baton serve` for the OpenAI-compatible endpoint\n"
+                  "  baton status           show key health and quota usage")
 
 
 # --- keys -------------------------------------------------------------------
 
 @keys_app.command("add")
-def keys_add(ctx: typer.Context) -> None:
+def keys_add(
+    ctx: typer.Context,
+    advanced: bool = typer.Option(False, "--advanced", help="Also ask for a key name, default model and quota limits."),
+) -> None:
     """Add a key interactively. The key itself is read from a hidden prompt or stdin, never from argv."""
     config, path, home = load(ctx)
     vault = open_vault(home)
-    if vault and add_key_interactive(config, vault):
+    if vault and add_key_interactive(config, vault, advanced=advanced):
         save_config(path, config)
 
 
@@ -679,6 +703,12 @@ def run_chat(ctx: typer.Context, model: str, workspace: Path | None, approval: s
                     agent.reset()
                     ui.info("conversation cleared")
                 elif command == "/model":
+                    if not argument and can_use_menu():
+                        names = runtime.pool.known_models()
+                        argument = choose(f"Pick a model (now: {agent.session.model})",
+                                          [(name, "auto (each key's default)" if name == "auto" else name)
+                                           for name in names],
+                                          default=agent.session.model)
                     if argument:
                         agent.session.model = argument
                     ui.info(f"model: {agent.session.model}")

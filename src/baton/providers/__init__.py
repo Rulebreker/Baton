@@ -29,6 +29,15 @@ PROVIDER_DEFAULTS: dict[str, ProviderDefaults] = {
     "openai_compatible": ProviderDefaults(None, "", 32_000),
 }
 
+# Models offered in the `/model` menu once a key for that provider exists. The first
+# entry of each list is the provider's default above.
+SUGGESTED_MODELS: dict[str, list[str]] = {
+    "openai": ["gpt-4o-mini", "gpt-4o"],
+    "anthropic": ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5-20251001"],
+    "gemini": ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite"],
+    "openai_compatible": [],
+}
+
 _ADAPTERS: dict[str, type[Provider]] = {
     "openai": OpenAIProvider,
     "anthropic": AnthropicProvider,
@@ -43,6 +52,7 @@ def build_providers(client: httpx.AsyncClient) -> dict[str, Provider]:
 
 __all__ = [
     "PROVIDER_DEFAULTS",
+    "SUGGESTED_MODELS",
     "ChatRequest",
     "ChatResult",
     "Provider",
