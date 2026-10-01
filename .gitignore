@@ -1,0 +1,66 @@
+# ---------------------------------------------------------------------------
+# Baton .gitignore
+# Rule of thumb: anything that can hold a secret, a quota counter, a transcript
+# or a machine-specific path is ignored. The pre-commit hook (.githooks/) is the
+# second line of defence in case someone uses `git add -f`.
+# ---------------------------------------------------------------------------
+
+# --- Secrets & local configuration -----------------------------------------
+.env
+.env.*
+!.env.example
+*.vault
+*.vault.bak
+*.vault.tmp
+master.key
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa*
+id_ed25519*
+secrets.*
+credentials.*
+# Real config files. Only *.example.yaml samples are committed.
+baton.yaml
+baton.yml
+baton.local.yaml
+config.local.yaml
+
+# --- Runtime state (usage counters, transcripts, checkpoints) ---------------
+.baton/
+state.json
+state.json.tmp
+sessions/
+checkpoints/
+*.log
+logs/
+
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# --- Editors / OS -----------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini

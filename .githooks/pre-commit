@@ -1,0 +1,30 @@
+#!/bin/sh
+# Baton pre-commit hook: block secrets, key stores, logs and local config.
+#
+# Enabled by `scripts/install-hooks.ps1` (Windows) or `scripts/install-hooks.sh`
+# (Linux/macOS), which point core.hooksPath at this directory.
+#
+# Fails CLOSED: if no Python interpreter can be found the commit is rejected,
+# because a silently skipped scan is worse than a blocked commit.
+
+root="$(git rev-parse --show-toplevel)" || exit 1
+scanner="$root/scripts/secret_scan.py"
+
+if [ ! -f "$scanner" ]; then
+    echo "pre-commit: scripts/secret_scan.py is missing; refusing to commit." >&2
+    exit 1
+fi
+
+for candidate in python3 python py; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+        # The Windows Store ships a `python3` stub that prints a hint and exits
+        # non-zero; make sure the interpreter really runs before trusting it.
+        if "$candidate" -c "import sys; sys.exit(0)" >/dev/null 2>&1; then
+            exec "$candidate" "$scanner" --staged
+        fi
+    fi
+done
+
+echo "pre-commit: no working Python interpreter found; cannot scan for secrets." >&2
+echo "pre-commit: install Python 3.10+ and retry. Commit rejected." >&2
+exit 1

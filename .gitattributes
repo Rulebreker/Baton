@@ -1,2 +1,8 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Hooks and shell scripts are executed by sh even on Windows (Git for Windows /
+# GitHub Desktop ship one); CRLF line endings would break the shebang.
+.githooks/* text eol=lf
+*.sh text eol=lf
+*.ps1 text eol=crlf
