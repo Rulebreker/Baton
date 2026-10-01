@@ -49,6 +49,10 @@ packages = ["src/baton"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "-q"
+filterwarnings = [
+    # Starlette's test client nags about its httpx dependency; irrelevant to Baton.
+    "ignore:Using `httpx` with `starlette.testclient`",
+]
 
 [tool.ruff]
 line-length = 120
