@@ -23,7 +23,7 @@ import logging
 import random
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -75,6 +75,10 @@ class KeyState:
     total_tokens: int = 0
     last_used: float = 0.0
     last_error: str = ""
+    # ErrorKind value of the latest failure (cleared by a success): the real cause, for messages.
+    last_kind: str = ""
+    # Why `cooldown_until` is set, so the router can tell "provider busy" from "key spent".
+    cooldown_kind: ErrorKind | None = None
 
     @property
     def id(self) -> str:
@@ -121,6 +125,9 @@ class KeyPool:
         self._last_save = 0.0
         self._dirty = False
         self._flush_pending = False
+        # Models learned from the providers' list endpoints (set by the router's catalog):
+        # key id -> names. Lets a key whose config says `auto` serve a specific model by name.
+        self.discovered: Callable[[str], list[str]] | None = None
         self.keys: dict[str, KeyState] = {}
         for order, key_config in enumerate(config.keys):
             secret = secrets.get(key_config.id)
@@ -148,22 +155,27 @@ class KeyPool:
         if alias is not None:
             target = alias.get(key.id) or alias.get(key.config.provider)
             return (target, 0) if target else (None, 0)
-        if requested in key.config.models:
+        if requested in key.config.models or requested in self._discovered(key.id):
             return requested, 0
         if self.rotation.unknown_model == "reject":
             return None, 1
         return key.config.default_model, 1
 
+    def _discovered(self, key_id: str) -> list[str]:
+        return self.discovered(key_id) if self.discovered else []
+
     def model_is_known(self, requested: str) -> bool:
         requested = (requested or "").strip()
         if requested.lower() in AUTO_MODELS or requested in self.config.model_aliases:
             return True
-        return any(requested in key.config.models for key in self.keys.values())
+        return any(requested in key.config.models or requested in self._discovered(key.id)
+                   for key in self.keys.values())
 
     def known_models(self) -> list[str]:
         names = {"auto", *self.config.model_aliases}
         for key in self.keys.values():
             names.update(key.config.models)
+            names.update(self._discovered(key.id))
         return sorted(names)
 
     # --- utilisation --------------------------------------------------------
@@ -274,12 +286,14 @@ class KeyPool:
         ranked.sort(key=lambda item: item[0])
         return [(key, target) for _rank, key, target in ranked]
 
-    def next_available_in(self) -> float | None:
-        """Seconds until some key becomes usable again, or None if none ever will."""
+    def next_available_in(self, exclude: Collection[str] = ()) -> float | None:
+        """Seconds until some key becomes usable again, or None if none ever will.
+
+        `exclude` are keys this request has already ruled out (they would never help it)."""
         now = self.clock()
         waits: list[float] = []
         for key in self.keys.values():
-            if key.manually_disabled:
+            if key.manually_disabled or key.id in exclude:
                 continue
             wait = max(key.cooldown_until, key.exhausted_until, key.disabled_until) - now
             if self.long_utilization(key) >= self.rotation.hard_limit:
@@ -289,6 +303,25 @@ class KeyPool:
                 wait = max(wait, _MINUTE - (now - oldest))
             waits.append(max(wait, 0.0))
         return min(waits) if waits else None
+
+    def waiting_on_temporary_only(self, exclude: Collection[str] = ()) -> bool:
+        """True when every key that is out of play is out only because of a passing problem
+        (provider busy, timeout, connection trouble) - never quota, a bad key or a hard limit.
+        That is the case where waiting is the right answer, and a longer wait is justified."""
+        now = self.clock()
+        benched = False
+        for key in self.keys.values():
+            if key.manually_disabled or key.id in exclude:
+                continue
+            if self.usable(key):
+                return False
+            if key.exhausted_until > now or key.disabled_until > now or self.long_utilization(key) >= self.rotation.hard_limit:
+                return False
+            if key.cooldown_until > now and key.cooldown_kind is not None and key.cooldown_kind.temporary:
+                benched = True
+                continue
+            return False
+        return benched
 
     # --- accounting ---------------------------------------------------------
 
@@ -313,7 +346,9 @@ class KeyPool:
         key.total_tokens += tokens
         key.failures = 0
         key.cooldown_until = 0.0
+        key.cooldown_kind = None
         key.last_error = ""
+        key.last_kind = ""
         if rate is not None:
             reported = rate.utilization()
             if reported is not None:
@@ -326,10 +361,13 @@ class KeyPool:
         now = self.clock()
         rotation = self.rotation
         key.last_error = f"{error.kind.value}: {error.message}"[:300]
+        key.last_kind = error.kind.value
         kind = error.kind
 
         if kind in (ErrorKind.BAD_REQUEST, ErrorKind.CONTEXT_LENGTH):
             return  # the request was at fault, not the key
+        if kind is ErrorKind.MODEL_NOT_FOUND:
+            return  # the model name was at fault, not the key: it stays in rotation, unpenalised
 
         if kind is ErrorKind.AUTH:
             # Parked rather than removed for good: a 403 can be a temporary
@@ -348,6 +386,18 @@ class KeyPool:
                 key.exhausted_until = now + wait  # a very long Retry-After is a quota, not a burst
             else:
                 key.cooldown_until = now + max(wait, 1.0)
+                key.cooldown_kind = kind
+        elif kind is ErrorKind.OVERLOADED:
+            # The provider is busy; nothing is wrong with the key, so no circuit breaker and no
+            # long park: short, growing, jittered waits that the router sits out (see
+            # Router._wait_for_capacity). A Retry-After from the provider is honoured, capped.
+            key.failures += 1
+            base = min(rotation.backoff_max, rotation.backoff_base * 2 ** min(key.failures, 10))
+            wait = base * (0.5 + random.random())  # noqa: S311 - jitter, not security
+            if error.retry_after:
+                wait = min(error.retry_after, rotation.overload_max_wait)
+            key.cooldown_until = now + max(wait, 0.5)
+            key.cooldown_kind = kind
         else:  # TRANSIENT, TIMEOUT, UNKNOWN
             key.failures += 1
             if key.failures >= rotation.breaker_threshold:
@@ -361,6 +411,7 @@ class KeyPool:
                 base = rotation.backoff_base * 2 ** (key.failures - 1)
                 wait = min(rotation.backoff_max, base) * (0.5 + random.random())  # noqa: S311 - not security
             key.cooldown_until = now + wait
+            key.cooldown_kind = kind
         self._dirty = True
         self.save()
 

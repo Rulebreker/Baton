@@ -68,6 +68,18 @@ class FakeProvider(Provider):
         self.scripts: dict[str, list[Any]] = {}
         self.stream_scripts: dict[str, list[list[Any]]] = {}
         self.default = lambda request: ok(GOOD_SUMMARY if is_summary_request(request) else "ok")
+        # secret -> model names (or an exception) answered by the list-models endpoint
+        self.model_lists: dict[str, Any] = {}
+        self.list_calls = 0
+
+    async def list_models(self, *, api_key: str, base_url: str) -> list[str]:
+        self.list_calls += 1
+        item = self.model_lists.get(api_key)
+        if item is None:
+            raise NotImplementedError("no model list scripted")
+        if isinstance(item, BaseException):
+            raise item
+        return list(item)
 
     def script(self, index: int, *items: Any) -> None:
         self.scripts.setdefault(secret_for(index), []).extend(items)

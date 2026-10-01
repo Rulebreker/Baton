@@ -38,6 +38,18 @@ _QUOTA_HINTS = (
 )
 
 
+# A busy provider says so in words as well as in the status code.
+_OVERLOAD_HINTS = (
+    "overloaded", "high demand", "try again later", "temporarily unavailable", "service unavailable",
+    "at capacity", "capacity",
+)
+_MODEL_CODE_HINTS = ("model_not_found", "model not found", "invalid_model", "unknown model")
+
+
+def _mentions_model(lowered: str) -> bool:
+    return "model" in lowered
+
+
 @dataclass
 class Usage:
     prompt_tokens: int = 0
@@ -230,11 +242,14 @@ def classify_http_error(provider: str, status: int, body: str, headers: httpx.He
       402             -> QUOTA_EXHAUSTED  (billing: park the key, rotate)
       429             -> RATE_LIMIT, or QUOTA_EXHAUSTED when the body says the
                          daily/monthly allowance is gone
-      408/409/5xx/529 -> TRANSIENT        (provider hiccup: strike, rotate)
+      503/529, or 5xx saying "overloaded"/"high demand"
+                      -> OVERLOADED       (the provider is busy, not the key: back off and wait)
+      408/409/other 5xx -> TRANSIENT      (provider hiccup: strike, rotate)
       400/413/422     -> BAD_REQUEST or CONTEXT_LENGTH (the *request* is wrong;
                          other keys would fail identically, so do not burn them)
-      404             -> UNKNOWN          (usually "model not available to this
-                         key": another key may well have it, so rotate)
+      404 about a model -> MODEL_NOT_FOUND (the model name is wrong or retired; the
+                         key is fine and is not penalised)
+      other 404       -> UNKNOWN          (rotate)
     """
     message, code = _extract_error_message(body)
     lowered = f"{message} {code} {body[:_MAX_ERROR_BODY]}".lower()
@@ -253,10 +268,16 @@ def classify_http_error(provider: str, status: int, body: str, headers: httpx.He
         kind = ErrorKind.QUOTA_EXHAUSTED
     elif status == 429:
         kind = ErrorKind.QUOTA_EXHAUSTED if any(h in lowered for h in _QUOTA_HINTS) else ErrorKind.RATE_LIMIT
+    elif status in (503, 529) or (status >= 500 and any(h in lowered for h in _OVERLOAD_HINTS)):
+        kind = ErrorKind.OVERLOADED
     elif status in (408, 409) or status >= 500:
         kind = ErrorKind.TRANSIENT
     elif status == 404:
-        kind = ErrorKind.UNKNOWN
+        # A 404 that talks about the model is a bad/retired model name. Any other 404 (wrong
+        # base URL, missing route) stays UNKNOWN, as before.
+        kind = ErrorKind.MODEL_NOT_FOUND if _mentions_model(lowered) else ErrorKind.UNKNOWN
+    elif status == 400 and any(h in lowered for h in _MODEL_CODE_HINTS):
+        kind = ErrorKind.MODEL_NOT_FOUND
     elif status in (400, 413, 422):
         if status == 400 and ("api key not valid" in lowered or "api_key_invalid" in lowered):
             kind = ErrorKind.AUTH  # Gemini answers 400, not 401, for a bad key
@@ -345,6 +366,14 @@ class Provider(ABC):
     @abstractmethod
     def stream(self, request: ChatRequest, *, api_key: str, base_url: str) -> AsyncIterator[StreamChunk]: ...
 
+    async def list_models(self, *, api_key: str, base_url: str) -> list[str]:
+        """Names of the chat models this key can use, without any `models/` prefix.
+
+        Adapters whose provider has a list endpoint override this. Raising is fine: the
+        caller treats any failure as "no list available" and falls back to the pinned name.
+        """
+        raise NotImplementedError(f"{self.name} has no model list")
+
     async def _post_json(self, url: str, headers: dict[str, str], payload: dict[str, Any]) -> httpx.Response:
         try:
             response = await self.client.post(url, headers=headers, json=payload)
@@ -352,3 +381,11 @@ class Provider(ABC):
             raise classify_transport_error(self.name, exc) from None
         await raise_for_status(self.name, response)
         return response
+
+    async def _get_json(self, url: str, headers: dict[str, str]) -> dict[str, Any]:
+        try:
+            response = await self.client.get(url, headers=headers)
+        except httpx.HTTPError as exc:
+            raise classify_transport_error(self.name, exc) from None
+        await raise_for_status(self.name, response)
+        return loads_or_error(self.name, response.text)

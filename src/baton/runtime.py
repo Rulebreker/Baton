@@ -15,6 +15,7 @@ import httpx
 from .config import BatonConfig
 from .errors import ConfigError
 from .handoff import HandoffManager
+from .models import ModelCatalog
 from .paths import ensure_private_dir
 from .pool import KeyPool
 from .providers import build_providers
@@ -112,7 +113,9 @@ class Runtime:
             ensure_private_dir(home)
         client = client or build_http_client(config)
         pool = KeyPool(config, secrets, state_path=(home / "state.json") if persist else None, clock=clock)
-        router = Router(config, pool, build_providers(client))
+        providers = build_providers(client)
+        catalog = ModelCatalog(providers, clock=clock, cache_path=(home / "models-cache.json") if persist else None)
+        router = Router(config, pool, providers, catalog=catalog)
 
         async def summarize(request: ChatRequest, pin: str | None, exclude: frozenset[str]) -> str:
             route = await router.complete(request, pin=pin, exclude=exclude)

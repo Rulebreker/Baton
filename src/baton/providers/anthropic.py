@@ -56,7 +56,8 @@ _STOP_REASONS = {
 }
 
 _STREAM_ERROR_KINDS = {
-    "overloaded_error": ErrorKind.TRANSIENT,
+    "overloaded_error": ErrorKind.OVERLOADED,
+    "not_found_error": ErrorKind.MODEL_NOT_FOUND,
     "api_error": ErrorKind.TRANSIENT,
     "rate_limit_error": ErrorKind.RATE_LIMIT,
     "authentication_error": ErrorKind.AUTH,
@@ -199,6 +200,10 @@ class AnthropicProvider(Provider):
         if stream:
             payload["stream"] = True
         return payload
+
+    async def list_models(self, *, api_key: str, base_url: str) -> list[str]:
+        data = await self._get_json(base_url.rstrip("/") + "/v1/models?limit=1000", self._headers(api_key))
+        return [str(item["id"]) for item in data.get("data") or [] if isinstance(item, dict) and item.get("id")]
 
     async def complete(self, request: ChatRequest, *, api_key: str, base_url: str) -> ChatResult:
         url = base_url.rstrip("/") + "/v1/messages"

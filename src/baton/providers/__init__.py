@@ -19,6 +19,8 @@ class ProviderDefaults:
     context_window: int
 
 
+# `model` is only the last-resort name, used when a provider's model list cannot be fetched
+# and nothing was cached; normally a key says `auto` and baton.models picks from the live list.
 # Suggested defaults used by the setup wizard and when config omits a value.
 # Quota limits are deliberately NOT defaulted here: free-tier numbers change
 # often, and a wrong built-in limit is worse than learning from 429s/headers.
@@ -27,15 +29,6 @@ PROVIDER_DEFAULTS: dict[str, ProviderDefaults] = {
     "anthropic": ProviderDefaults("https://api.anthropic.com", "claude-opus-5-5", 1_000_000),
     "gemini": ProviderDefaults("https://generativelanguage.googleapis.com/v1beta", "gemini-3.8-flash", 1_000_000),
     "openai_compatible": ProviderDefaults(None, "", 32_000),
-}
-
-# Models offered in the `/model` menu once a key for that provider exists. The first
-# entry of each list is the provider's default above.
-SUGGESTED_MODELS: dict[str, list[str]] = {
-    "openai": ["gpt-4o-mini", "gpt-4o"],
-    "anthropic": ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5-20251001"],
-    "gemini": ["gemini-3.8-flash"],
-    "openai_compatible": [],
 }
 
 _ADAPTERS: dict[str, type[Provider]] = {
@@ -52,7 +45,6 @@ def build_providers(client: httpx.AsyncClient) -> dict[str, Provider]:
 
 __all__ = [
     "PROVIDER_DEFAULTS",
-    "SUGGESTED_MODELS",
     "ChatRequest",
     "ChatResult",
     "Provider",

@@ -81,6 +81,10 @@ class OpenAICompatProvider(Provider):
                 payload["stream_options"] = {"include_usage": True}
         return payload
 
+    async def list_models(self, *, api_key: str, base_url: str) -> list[str]:
+        data = await self._get_json(base_url.rstrip("/") + "/models", self._headers(api_key))
+        return [str(item["id"]) for item in data.get("data") or [] if isinstance(item, dict) and item.get("id")]
+
     async def complete(self, request: ChatRequest, *, api_key: str, base_url: str) -> ChatResult:
         url = base_url.rstrip("/") + "/chat/completions"
         response = await self._post_json(url, self._headers(api_key), self._payload(request, stream=False))

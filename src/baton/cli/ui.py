@@ -26,6 +26,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/help", "show all commands"),
     ("/model", "pick a model from a list"),
     ("/status", "key pool status and quota usage"),
+    ("/models", "check each key's models against the provider (/models --fix repairs stale ones)"),
     ("/keys", "list your API keys"),
     ("/keys add", "add an API key"),
     ("/keys test", "send a tiny test request through each key"),
@@ -170,6 +171,15 @@ class TerminalUI:
 
     def error(self, message: str) -> None:
         self.console.print(f"[red]{escape(message)}[/]")
+
+    def notice(self, message: str) -> None:
+        """Something to tell the user in the middle of a turn (model swapped, provider busy)."""
+        waiting = self._status is not None
+        self._stop_waiting()
+        self._end_stream()
+        self.console.print(f"[dim]~ {escape(message)}[/]")
+        if waiting:
+            self.start_waiting()
 
     def show_status(self) -> None:
         self.console.print(keys_table(self.pool))

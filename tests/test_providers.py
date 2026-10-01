@@ -200,7 +200,7 @@ async def test_anthropic_stream_translation_and_in_band_error():
     adapter, _ = provider("anthropic", lambda r: httpx.Response(200, content=overloaded))
     with pytest.raises(ProviderError) as caught:
         await collect(adapter.stream(ChatRequest(model="claude-opus-5-5", messages=CONVERSATION[:2]), api_key=KEY, base_url="https://a.test"))
-    assert caught.value.kind is ErrorKind.TRANSIENT
+    assert caught.value.kind is ErrorKind.OVERLOADED          # a busy provider, not a failing key
 
 
 # --- Gemini -----------------------------------------------------------------
@@ -283,9 +283,21 @@ async def test_gemini_blocked_prompt_and_stream():
     (429, '{"error": {"status": "RESOURCE_EXHAUSTED", "details": [{"quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier"}]}}', ErrorKind.QUOTA_EXHAUSTED),
     (429, '{"error": {"status": "RESOURCE_EXHAUSTED", "details": [{"quotaId": "GenerateRequestsPerMinutePerProjectPerModel"}]}}', ErrorKind.RATE_LIMIT),
     (500, "oops", ErrorKind.TRANSIENT),
-    (529, '{"error": {"type": "overloaded_error"}}', ErrorKind.TRANSIENT),
+    (529, '{"error": {"type": "overloaded_error"}}', ErrorKind.OVERLOADED),
+    # The two Google errors seen on a real Cloud Shell run:
+    (503, '{"error": {"code": 503, "message": "This model is currently experiencing high demand. Spikes in demand '
+          'are usually temporary. Please try again later.", "status": "UNAVAILABLE"}}', ErrorKind.OVERLOADED),
+    (404, '{"error": {"code": 404, "message": "This model models/gemini-2.5-flash is no longer available to new '
+          'users. Please update your code to use models/gemini-3.8-flash for the latest features.", '
+          '"status": "NOT_FOUND"}}', ErrorKind.MODEL_NOT_FOUND),
+    (503, "", ErrorKind.OVERLOADED),                                        # by status alone, with no message at all
+    (502, '{"error": {"message": "backend is overloaded, try again later"}}', ErrorKind.OVERLOADED),
+    (502, "bad gateway", ErrorKind.TRANSIENT),                              # a plain gateway error is not "busy"
+    (500, '{"error": {"message": "internal error"}}', ErrorKind.TRANSIENT),
     (408, "", ErrorKind.TRANSIENT),
-    (404, '{"error": {"message": "model not found"}}', ErrorKind.UNKNOWN),
+    (404, '{"error": {"message": "model not found"}}', ErrorKind.MODEL_NOT_FOUND),
+    (404, '{"error": {"message": "no such route"}}', ErrorKind.UNKNOWN),                 # a 404 that is not about a model
+    (400, '{"error": {"message": "x", "code": "model_not_found"}}', ErrorKind.MODEL_NOT_FOUND),
     (400, '{"error": {"message": "This model\'s maximum context length is 8192 tokens"}}', ErrorKind.CONTEXT_LENGTH),
     (413, "", ErrorKind.CONTEXT_LENGTH),
     (400, '{"error": {"message": "API key not valid. Please pass a valid API key.", "status": "INVALID_ARGUMENT"}}', ErrorKind.AUTH),

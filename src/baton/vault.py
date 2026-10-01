@@ -106,6 +106,46 @@ def load_raw_key(home: Path) -> bytes | None:
     return None
 
 
+def raw_key_location(home: Path) -> str | None:
+    """Where a keyfile-mode master key currently lives: "OS keychain", "key file", or None."""
+    backend = _keyring()
+    if backend is not None:
+        try:
+            if backend.get_password(_KEYRING_SERVICE, _KEYRING_USER):
+                return "OS keychain"
+        except Exception:  # noqa: BLE001, S110
+            pass
+    return "key file" if (home / KEYFILE).is_file() else None
+
+
+def peek_vault_mode(path: Path) -> str | None:
+    """"passphrase" or "keyfile" for the vault at `path`, read without decrypting it."""
+    try:
+        name = json.loads(path.read_text(encoding="utf-8"))["kdf"]["name"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return "passphrase" if name == "scrypt" else "keyfile" if name == "raw" else None
+
+
+def shred(path: Path) -> None:
+    """Best-effort secure delete: overwrite with random bytes, flush, remove.
+
+    Journaling and copy-on-write filesystems and SSD wear levelling can keep old blocks, so
+    this is hygiene rather than a guarantee; the old data was encrypted either way."""
+    try:
+        size = path.stat().st_size
+        with path.open("r+b") as handle:
+            handle.write(os.urandom(max(size, 1)))
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError:
+        pass
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
 def hash_token(token: str) -> str:
     # Tokens are 256 bits of randomness, so a fast hash is appropriate; a slow
     # KDF would only add latency to every proxied request.
@@ -181,6 +221,53 @@ class Vault:
         except ValueError:
             raise VaultError("vault contents are corrupted") from None
         return cls(path, key, kdf, data)
+
+    # --- mode ---------------------------------------------------------------
+
+    @property
+    def mode(self) -> str:
+        """"passphrase" (legacy) or "keyfile" (key in the OS keychain or a private file)."""
+        return "passphrase" if self._kdf.get("name") == "scrypt" else "keyfile"
+
+    def migrate_to_keyfile(self) -> str:
+        """Re-encrypt a legacy passphrase vault under a random key kept in the OS keychain (or a
+        0600 file where there is no keychain), prove the new vault opens, then erase the old copy.
+
+        Returns where the key now lives. On any failure the original vault is restored untouched
+        and VaultError is raised, so a failed migration can never lose keys.
+        """
+        if self.mode != "passphrase":
+            raise VaultError("the vault is already in keyfile mode")
+        home = self.path.parent
+        keyfile_existed = (home / KEYFILE).exists()
+        old_key, old_kdf = self._key, self._kdf
+        backup = self.path.with_name(self.path.name + ".bak")
+        new_key = AESGCM.generate_key(bit_length=256)
+        try:
+            where = store_raw_key(home, new_key)
+        except OSError as exc:
+            raise VaultError(f"could not store the new vault key ({type(exc).__name__})") from None
+        self._key, self._kdf = new_key, {"name": "raw"}
+        try:
+            self.save()  # copies the legacy file to .bak first, then replaces the vault atomically
+            check = Vault.open(self.path)
+            if check._data != self._data:
+                raise VaultError("the migrated vault did not read back identically")
+        except Exception as exc:  # noqa: BLE001 - roll everything back, whatever went wrong
+            self._key, self._kdf = old_key, old_kdf
+            if backup.is_file():
+                shutil.copy2(backup, self.path)
+                shred(backup)
+            if not keyfile_existed:
+                try:
+                    (home / KEYFILE).unlink()
+                except OSError:
+                    pass
+            if isinstance(exc, VaultError):
+                raise
+            raise VaultError(f"migration failed ({type(exc).__name__}); the passphrase vault was kept") from None
+        shred(backup)  # the old passphrase-encrypted copy must not linger
+        return "OS keychain" if where == "OS keychain" else "key file"
 
     # --- persistence --------------------------------------------------------
 

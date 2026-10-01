@@ -83,7 +83,7 @@ def test_simple_wizard_only_asks_for_provider_and_key(home):
     assert "passphrase" not in result.output.lower()                        # nothing to type, ever
     key = load_config(home / "config.yaml").keys[0]
     assert (key.id, key.provider) == ("gemini-1", "gemini")
-    assert key.models[0] == "gemini-3.8-flash"
+    assert key.models == ["auto"]                                           # resolved from the live model list
     assert CREDENTIAL not in result.output
 
 
@@ -174,7 +174,7 @@ def test_interactive_session_survives_slash_commands_and_a_failing_turn(home, tm
     assert run_init().exit_code == 0
     config_file = home / "config.yaml"
     # Fail fast instead of waiting for the unreachable upstream to "recover".
-    config_file.write_text(config_file.read_text(encoding="utf-8") + "rotation:\n  max_queue_wait: 0\n  connect_timeout: 2\n",
+    config_file.write_text(config_file.read_text(encoding="utf-8") + "rotation:\n  max_queue_wait: 0\n  overload_max_wait: 0\n  connect_timeout: 2\n",
                            encoding="utf-8")
     workspace = tmp_path / "ws"
     workspace.mkdir()
@@ -198,7 +198,7 @@ def test_interactive_session_survives_slash_commands_and_a_failing_turn(home, tm
 def test_one_shot_prompt_exits_nonzero_when_no_key_can_answer(home, tmp_path):
     assert run_init().exit_code == 0
     config_file = home / "config.yaml"
-    config_file.write_text(config_file.read_text(encoding="utf-8") + "rotation:\n  max_queue_wait: 0\n  connect_timeout: 2\n",
+    config_file.write_text(config_file.read_text(encoding="utf-8") + "rotation:\n  max_queue_wait: 0\n  overload_max_wait: 0\n  connect_timeout: 2\n",
                            encoding="utf-8")
     result = runner.invoke(app, ["chat", "-p", "hello", "--workspace", str(tmp_path)])
     assert result.exit_code == 1 and "exhausted" in result.output

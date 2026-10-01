@@ -83,7 +83,9 @@ class KeyConfig(_Model):
         if not self.models:
             if not defaults.model:
                 raise ValueError(f"key '{self.id}': provider 'openai_compatible' requires at least one model")
-            self.__dict__["models"] = [defaults.model]
+            # "auto" = whichever suitable model the provider currently lists (see baton.models),
+            # so a config never goes stale when a model is retired.
+            self.__dict__["models"] = ["auto"]
         if self.context_window is None:
             self.__dict__["context_window"] = defaults.context_window
         _check_upstream_url(self.id, str(self.base_url), self.allow_insecure_http)
@@ -131,6 +133,9 @@ class RotationConfig(_Model):
     connect_timeout: float = Field(default=10.0, gt=0.5, le=120)
     stream_idle_timeout: float = Field(default=90.0, gt=1, le=3600)
     max_queue_wait: float = Field(default=15.0, ge=0, le=600)
+    # How long to keep waiting when every key is only *temporarily* unavailable (provider
+    # overloaded / 503 / timeouts), as opposed to quota windows (`max_queue_wait`).
+    overload_max_wait: float = Field(default=90.0, ge=0, le=900)
     backoff_base: float = Field(default=0.5, gt=0, le=60)
     backoff_max: float = Field(default=30.0, gt=0, le=3600)
     breaker_threshold: int = Field(default=3, ge=1, le=50)

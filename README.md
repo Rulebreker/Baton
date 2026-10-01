@@ -73,6 +73,7 @@ baton                 start the agent in the current directory
 baton serve           start the OpenAI-compatible endpoint on 127.0.0.1:8787
 baton status          key health and quota usage
 baton doctor          check the setup for configuration and security problems
+baton models          check each key's models against the provider (--fix repairs stale ones)
 baton update          update Baton to the latest version
 baton keys add        add another key        (also: list, remove, enable, disable, test)
 baton token new NAME  create a proxy token   (also: list, revoke)
@@ -109,6 +110,7 @@ model and approval mode. `exit`, and shell-style input such as `baton keys list`
 | `/help` | list every command |
 | `/model` | pick a model from a list with the arrow keys (or `/model NAME`; `auto` uses each key's default) |
 | `/status` | key pool table with per-minute and per-day usage |
+| `/models` | check each key's models against what its provider offers now; `/models --fix` rewrites stale pins |
 | `/keys` | list keys. Also `/keys add`, `/keys test [ID]`, `/keys remove ID`, `/keys enable ID`, `/keys disable ID`; changes apply immediately |
 | `/token` | list proxy tokens (`/token new NAME` creates one) |
 | `/doctor` | check the setup for problems |
@@ -157,11 +159,20 @@ Most tools read `OPENAI_BASE_URL` and `OPENAI_API_KEY`, so setting those two var
 | `GET /v1/baton/status` | key health and usage (no secrets) |
 | `GET /healthz` | liveness; no token needed, reveals nothing |
 
-**Model names.** `auto` uses each key's default model. A model listed under a key is routed to keys that
-offer it first. Any other name (for example a hard-coded `gpt-4o-mini` in an app you did not write) is
-served by each key's default model, so existing projects work unchanged. Set
+**Model names.** `auto` uses each key's default model, and a key whose `models:` is `[auto]` (what the
+wizard writes) gets a suitable model from the provider's live model list, cached for six hours in
+`~/.baton/models-cache.json`; no model name is hardcoded. A model listed under a key, or found in that list,
+is routed to keys that offer it first. Any other name (for example a hard-coded `gpt-4o-mini` in an app you
+did not write) is served by each key's default model, so existing projects work unchanged. Set
 `rotation.unknown_model: reject` if you would rather get an error. Response headers `x-baton-key` and
 `x-baton-attempts` tell you which key answered.
+
+**Retired or renamed models.** If a provider answers 404 "model not found / no longer available", the
+*key* is fine and is not penalised. Baton looks the model up again (the replacement the provider's own
+error names, if its list confirms it, otherwise the best live match of the same tier), retries once on the
+same key, remembers the swap, and prints `model 'old' is no longer available for key k1; using 'new'
+instead`. At startup the agent also checks pinned names against the lists. `baton models` shows what each
+key uses and `baton models --fix` (or `/models --fix`) rewrites stale pins in the config.
 
 Not implemented: embeddings, images, audio, the Responses API, and `n > 1`.
 
@@ -184,7 +195,8 @@ The settings that matter most:
 | `keys[].priority` | `0` | Lower numbers are used first. |
 | `rotation.handoff_threshold` | `0.90` | Daily-quota fraction at which a session plans its handoff. |
 | `rotation.hard_limit` | `0.98` | Past this a key takes no new requests. |
-| `rotation.max_queue_wait` | `15` | Seconds to wait for a key to recover before failing closed. |
+| `rotation.max_queue_wait` | `15` | Seconds to wait for a quota window to clear before failing closed. |
+| `rotation.overload_max_wait` | `90` | Seconds to keep retrying when every key is only *temporarily* out (provider busy, timeouts). |
 | `handoff.keep_recent_messages` | `6` | Newest messages carried verbatim through a handoff. |
 | `proxy.host` | `127.0.0.1` | Bind address. See [network exposure](#network-exposure). |
 | `proxy.rate_limit` | 120/min, burst 30 | Per client token. |
@@ -200,7 +212,8 @@ Data directory contents (`~/.baton`, override with `BATON_HOME`):
 | --- | --- |
 | `config.yaml` | settings; no secrets |
 | `keys.vault` (+ `.bak`) | AES-256-GCM encrypted API keys and proxy-token hashes |
-| `master.key` | vault key, **keyfile mode without a keychain only** |
+| `master.key` | vault key (mode 0600), **only where there is no OS keychain**, e.g. Google Cloud Shell |
+| `models-cache.json` | each key's model list from its provider, so startup needs no network call |
 | `state.json` | per-key usage counters, so daily quotas survive a restart |
 | `logs/baton.log` | scrubbed, size-capped, rotated |
 | `checkpoints/` | scrubbed full transcripts saved before each handoff |
@@ -223,10 +236,12 @@ summary.
 | 429 rate limit | cool the key down (honouring `Retry-After`), retry on the next key |
 | quota exhausted, billing (402) | park the key until it resets, retry on the next key |
 | 401 / 403 | park the key (re-probed hourly), retry on the next key |
-| 5xx, timeouts, network errors | strike against the circuit breaker, retry on the next key |
+| 404 "model not found / retired" | the key is **not** penalised: re-resolve the model, retry once on the same key, tell the user |
+| 503 / 529 / "high demand" / overloaded | the provider is busy, not the key: short exponential backoff with jitter (honours `Retry-After`), no circuit breaker; Baton waits, showing `provider busy, retrying in 4s...` |
+| other 5xx, timeouts, network errors | strike against the circuit breaker, retry on the next key |
 | 400 bad request | returned to the caller immediately; other keys would fail the same way |
 | prompt too long | try a key with a larger context window, else compact the conversation |
-| all keys unavailable | wait if a key recovers within `max_queue_wait`, otherwise **fail closed** with a clear error |
+| all keys unavailable | wait (up to `overload_max_wait` if every key is only temporarily out, else `max_queue_wait`), otherwise **fail closed**. The message names the real cause of each key: "provider overloaded", "model not found", "key rejected", ... |
 
 The retried request is the *same* request with the full conversation, so nothing is dropped. Attempts are
 bounded (two passes over the pool), so Baton cannot loop forever.
@@ -334,13 +349,19 @@ Report vulnerabilities privately: see [SECURITY.md](SECURITY.md).
 
 | Symptom | Cause and fix |
 | --- | --- |
-| `All N API key(s) are exhausted, rate-limited or unhealthy` | Baton prints each key's last error under this line. `404` means the model name is wrong or retired (`/model`, or edit `models:` in the config); `auth`/`401`/`403` means the key is bad (`/keys remove ID`, then `/keys add`); otherwise the pool really is spent: `/status` shows when keys retry. |
+| `All N API key(s) are exhausted, rate-limited or unhealthy` | Quota or key trouble. Baton prints each key's last error under this line; `/status` shows when keys retry. A rejected key (`auth`, 401/403): `/keys remove ID`, then `/keys add`. |
+| `No key could answer (k1: model not found or retired; k2: provider overloaded ...)` | A mix of causes, listed per key. Fix each one: for the model, `/models --fix`; the overloaded part needs nothing from you. |
+| `No key can use the requested model` | Every key got 404 for that model name. Baton already tried to swap in a live one; pick one with `/model`, or `baton models --fix`. |
+| `The provider is overloaded right now (high demand)` | HTTP 503/529 on every key, for longer than `rotation.overload_max_wait`. Your keys are fine. Send the message again in a minute, or raise the setting. |
+| `provider busy, retrying in 4s...` | Not an error: the provider answered 503 and Baton is backing off. |
+| `model 'x' is no longer available for key k1; using 'y' instead` | A pinned model was retired and Baton swapped it. Make it permanent with `baton models --fix`. |
+| `models/... is no longer available to new users` (404) | The same, as Google words it; handled automatically as above. |
 | A key shows `disabled` | The provider rejected it (401/403). Check the key, then `baton keys enable ID`. It is re-probed hourly anyway. |
 | No planned handoff ever happens | The key has no `rpd`/`tpd` limit configured. `baton doctor` lists such keys. |
 | `401 missing or invalid Baton token` | The client is sending its old provider key. Use the token from `baton token new`. |
 | `403 invalid Host header` | The endpoint was reached through a name other than `localhost`/`127.0.0.1`. |
 | `403 origin not allowed` | A browser app is calling the proxy. Add its origin to `proxy.cors_origins`. |
-| Vault passphrase prompt in a service | Set `BATON_PASSPHRASE` in the service's environment. |
+| Asked for a "Vault passphrase" | Only a vault created by an older Baton does this, and only once: after you enter it, Baton converts the vault to a keychain/key-file scheme, erases the old copy and never asks again. `baton doctor` shows the vault mode. |
 | Something odd | Look at `~/.baton/logs/baton.log`; it is scrubbed and safe to share after a quick read. |
 
 ## Contributing

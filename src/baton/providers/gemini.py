@@ -12,6 +12,7 @@ import re
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -233,6 +234,22 @@ class GeminiProvider(Provider):
                         calling["allowedFunctionNames"] = [choice["function"]["name"]]
                     payload["toolConfig"] = {"functionCallingConfig": calling}
         return payload
+
+    async def list_models(self, *, api_key: str, base_url: str) -> list[str]:
+        names: list[str] = []
+        token = ""
+        for _page in range(10):
+            url = f"{base_url.rstrip('/')}/models?pageSize=1000"
+            if token:
+                url += "&pageToken=" + quote(token, safe="")
+            data = await self._get_json(url, self._headers(api_key))
+            for model in data.get("models") or []:
+                if isinstance(model, dict) and "generateContent" in (model.get("supportedGenerationMethods") or []):
+                    names.append(str(model.get("name", "")).removeprefix("models/"))
+            token = str(data.get("nextPageToken") or "")
+            if not token:
+                break
+        return [name for name in names if name]
 
     async def complete(self, request: ChatRequest, *, api_key: str, base_url: str) -> ChatResult:
         url = self._url(base_url, request.model, stream=False)

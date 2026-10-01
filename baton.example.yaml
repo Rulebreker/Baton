@@ -16,7 +16,8 @@ keys:
   # Free-tier keys from several teammates. Add as many as you like.
   - id: gemini-alice
     provider: gemini              # gemini | openai | anthropic | openai_compatible
-    models: [gemini-3.8-flash]    # first entry is the key's default model
+    models: [auto]                # "auto" = the best model the provider lists right now; or pin names.
+                                  # The first entry is the key's default model.
     limits:                       # check your provider's current free-tier numbers
       rpm: 10                     # requests per minute
       rpd: 250                    # requests per day   <- enables planned handoff at 90%
@@ -73,7 +74,8 @@ rotation:
   request_timeout: 120
   connect_timeout: 10
   stream_idle_timeout: 90
-  max_queue_wait: 15              # seconds to wait for a key to recover before failing closed
+  max_queue_wait: 15              # seconds to wait for a quota window to clear before failing closed
+  overload_max_wait: 90           # seconds to keep retrying when every key is only temporarily out (503, timeouts)
   breaker_threshold: 3            # consecutive failures before a key's circuit breaker opens
   breaker_cooldown: 60
 

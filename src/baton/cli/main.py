@@ -33,11 +33,11 @@ from ..errors import AllKeysExhaustedError, BatonError, ConfigError, ProviderErr
 from ..logging_setup import setup_logging
 from ..paths import baton_home, ensure_private_dir
 from ..pool import clear_parked_state
-from ..providers import PROVIDER_DEFAULTS, SUGGESTED_MODELS
+from ..providers import PROVIDER_DEFAULTS
 from ..providers.base import ChatRequest
 from ..redact import scrub
 from ..runtime import Runtime
-from ..vault import PASSPHRASE_ENV, VAULT_FILE, Vault
+from ..vault import PASSPHRASE_ENV, VAULT_FILE, Vault, peek_vault_mode, raw_key_location
 from .select import can_use_menu, choose
 
 log = logging.getLogger("baton.cli")
@@ -101,6 +101,8 @@ def load(ctx: typer.Context, *, console_logs: bool = False) -> tuple[BatonConfig
 def ask_passphrase() -> str:
     if not sys.stdin.isatty():
         raise VaultError(f"vault is passphrase-protected; set {PASSPHRASE_ENV} for non-interactive use")
+    console.print("[dim]This vault was made with a passphrase. Baton no longer uses one: enter it this one last "
+                  "time and the vault is converted, so you are never asked again.[/]")
     return typer.prompt("Vault passphrase", hide_input=True)
 
 
@@ -111,10 +113,21 @@ def open_vault(home: Path, *, required: bool = True) -> Vault | None:
             fail(f"no vault found at {path}. Run `baton init` first.")
         return None
     try:
-        return Vault.open(path, passphrase_provider=ask_passphrase)
+        vault = Vault.open(path, passphrase_provider=ask_passphrase)
     except VaultError as exc:
         fail(str(exc))
-    return None
+        return None
+    if vault.mode == "passphrase":
+        # Legacy vault: convert it now that it is open, so this was the last passphrase prompt.
+        try:
+            where = vault.migrate_to_keyfile()
+        except VaultError as exc:
+            stderr.print(f"[yellow]warning:[/] could not convert the vault ({escape(scrub(str(exc)))}); "
+                         "it keeps its passphrase for now.")
+        else:
+            console.print(f"[green]Vault converted:[/] no passphrase needed from now on (key kept in the {where}); "
+                          "the old passphrase-protected copy was erased.")
+    return vault
 
 
 def build_runtime(ctx: typer.Context, *, console_logs: bool = False) -> Runtime:
@@ -173,9 +186,10 @@ def add_key_interactive(config: BatonConfig, vault: Vault, *, advanced: bool = F
         base_url = typer.prompt("Base URL (e.g. https://api.groq.com/openai/v1)").strip()
         models = [typer.prompt("Model name (e.g. llama-3.3-70b-versatile)").strip()]
     else:
-        models = list(SUGGESTED_MODELS.get(provider) or [defaults.model])
+        # "auto": Baton asks the provider which models exist right now, so nothing goes stale.
+        models = ["auto"]
         if advanced:
-            models = [typer.prompt("Default model", default=models[0]).strip(), *models[1:]]
+            models = [typer.prompt("Model (or 'auto' to pick the best available)", default="auto").strip()]
     limits = Limits()
     if advanced:
         console.print("[dim]Quota limits let Baton hand off *before* a key runs dry. Leave blank if unknown;\n"
@@ -222,6 +236,7 @@ INLINE_COMMANDS: dict[str, Callable[[list[str]], list[str]]] = {
     "/keys": lambda parts: ["keys", *(parts or ["list"])],
     "/token": lambda parts: ["token", *(parts or ["list"])],
     "/doctor": lambda parts: ["doctor", *parts],
+    "/models": lambda parts: ["models", *parts],
     "/update": lambda parts: ["update"],
     "/version": lambda parts: ["--version"],
 }
@@ -253,13 +268,19 @@ def run_inline(ctx: typer.Context, args: list[str]) -> None:
         console.print(f"[red]{escape(scrub(str(exc)) or type(exc).__name__)}[/]")
 
 
-def exhausted_hint(reasons: list[str]) -> str:
-    text = " ".join(reasons).lower()
-    if "404" in text:
-        return "The model name looks wrong or retired: pick another with /model, or fix it with /keys."
-    if "auth" in text or "401" in text or "403" in text or "api key not valid" in text:
-        return "A key was rejected: replace it with /keys remove NAME, then /keys add."
-    return "Check /status, add keys with /keys add, or try again in a moment."
+def exhausted_hint(kinds: dict[str, str]) -> str:
+    """Advice that matches what actually happened to the keys: one sentence per cause present."""
+    present = set(kinds.values())
+    hints = []
+    if "model_not_found" in present:
+        hints.append("A model was not found: pick another with /model, or run /models --fix.")
+    if "auth" in present:
+        hints.append("A key was rejected: replace it with /keys remove NAME, then /keys add.")
+    if "overloaded" in present:
+        hints.append("The provider is busy, not your keys: wait a minute and send it again.")
+    if present & {"rate_limit", "quota_exhausted"}:
+        hints.append("Some keys are out of quota: /status shows when they retry.")
+    return " ".join(hints) or "Check /status, add keys with /keys add, or try again in a moment."
 
 
 # --- root -------------------------------------------------------------------
@@ -518,6 +539,13 @@ def doctor(ctx: typer.Context) -> None:
 
     vault_file = home / VAULT_FILE
     report(vault_file.is_file(), f"vault present at {vault_file}", warn=True)
+    vault_mode = peek_vault_mode(vault_file) if vault_file.is_file() else None
+    if vault_mode == "passphrase":
+        report(False, "vault mode: legacy passphrase. It is converted automatically the next time a command "
+                      "opens it (you are asked for the passphrase once).", warn=True)
+    elif vault_mode == "keyfile":
+        location = raw_key_location(home)
+        report(location is not None, f"vault mode: keyfile, key stored in the {location or 'NOWHERE (key missing)'}")
     if os.name == "posix":
         mode = stat.S_IMODE(home.stat().st_mode)
         report(mode & 0o077 == 0, f"data directory is private (mode {oct(mode)})")
@@ -557,6 +585,65 @@ def doctor(ctx: typer.Context) -> None:
     console.print("\n[green]No problems found.[/]" if not problems else f"\n[red]{problems} problem(s) found.[/]")
     if problems:
         raise typer.Exit(1)
+
+
+# --- models -----------------------------------------------------------------
+
+@app.command()
+def models(
+    ctx: typer.Context,
+    fix: bool = typer.Option(False, "--fix", help="Rewrite pinned models the provider no longer offers."),
+) -> None:
+    """Check each key's configured models against what its provider offers right now."""
+    from ..models import audit_pinned_models
+
+    runtime = build_runtime(ctx)
+    catalog = runtime.router.catalog
+
+    async def inspect() -> tuple[list, dict[str, str | None]]:
+        try:
+            stale = await audit_pinned_models(runtime.pool, catalog, refresh=True)
+            resolved: dict[str, str | None] = {}
+            for key in runtime.pool.keys.values():
+                if key.config.default_model.lower() in ("auto", "default", "baton"):
+                    listed = await catalog.available(key)
+                    resolved[key.id] = await catalog.best(key) if listed else None
+            return stale, resolved
+        finally:
+            await runtime.aclose()
+
+    stale, resolved = asyncio.run(inspect())
+    table = Table(box=None, header_style="bold")
+    for column in ("key", "provider", "models", "now"):
+        table.add_column(column, overflow="fold")
+    bad = {(item.key_id, item.model): item for item in stale}
+    for key in runtime.pool.keys.values():
+        shown = ", ".join(f"[red]{escape(m)}[/]" if (key.id, m) in bad else escape(m) for m in key.config.models)
+        if key.id in resolved:
+            now = escape(resolved[key.id]) if resolved[key.id] else "[yellow]list unavailable[/]"
+        else:
+            now = ", ".join(f"{escape(i.model)} -> {escape(i.suggestion or '?')}" for i in stale if i.key_id == key.id)
+        table.add_row(key.id, key.config.provider, shown, now or "[green]ok[/]")
+    console.print(table)
+    if not stale:
+        console.print("[green]Nothing to fix.[/]")
+        return
+    fixable = [item for item in stale if item.suggestion]
+    if not fix:
+        console.print(f"\n{len(stale)} pinned model(s) are no longer offered. Baton works around this automatically; "
+                      "make it permanent with `baton models --fix` (or `/models --fix` in the chat).")
+        return
+    config = runtime.config
+    for item in fixable:
+        key = config.key(item.key_id)
+        if key is not None:
+            key.models = list(dict.fromkeys(item.suggestion if m == item.model else m for m in key.models))
+    save_config(config_path(ctx), config)
+    console.print(f"[green]Updated {len(fixable)} model(s) in the config.[/]")
+    for item in stale:
+        if not item.suggestion:
+            console.print(f"[yellow]No replacement could be chosen for {item.key_id}: '{escape(item.model)}'. "
+                          "Edit `models:` in the config.[/]")
 
 
 # --- update -----------------------------------------------------------------
@@ -674,6 +761,7 @@ def run_chat(ctx: typer.Context, model: str, workspace: Path | None, approval: s
         fail(f"workspace {root_dir} is not a directory")
 
     ui = TerminalUI(console, runtime.pool, show_handoffs=agent_config.show_handoffs)
+    runtime.router.on_notice = ui.notice          # "model swapped", "provider busy, retrying in 4s..."
     interactive = prompt is None and is_interactive()
 
     async def approve(name: str, description: str) -> bool:
@@ -716,7 +804,7 @@ def run_chat(ctx: typer.Context, model: str, workspace: Path | None, approval: s
             ui.error(str(exc))
             for reason in exc.reasons[:4]:
                 ui.info(f"  {reason[:220]}")
-            ui.info(f"Your message was not sent. {exhausted_hint(exc.reasons)}")
+            ui.info(f"Your message was not sent. {exhausted_hint(exc.kinds)}")
         except ProviderError as exc:
             ui.error(exc.message)
         except BatonError as exc:
@@ -738,6 +826,7 @@ def run_chat(ctx: typer.Context, model: str, workspace: Path | None, approval: s
         old, runtime = runtime, fresh
         agent.runtime = fresh
         ui.pool = fresh.pool
+        fresh.router.on_notice = ui.notice
         loop.run_until_complete(old.client.aclose())
         ui.info(f"keys reloaded: {len(fresh.pool.keys)} key(s) in the pool")
 
@@ -747,7 +836,30 @@ def run_chat(ctx: typer.Context, model: str, workspace: Path | None, approval: s
 
     ui.set_toolbar(toolbar)
 
+    def check_pinned_models() -> None:
+        """Best effort, at most a few seconds: a config that pins a model the provider has retired
+        is worked around right away (no failed first message) and reported once."""
+        from ..models import audit_pinned_models
+
+        try:
+            stale = loop.run_until_complete(asyncio.wait_for(
+                audit_pinned_models(runtime.pool, runtime.router.catalog), timeout=8))
+        except Exception:  # noqa: BLE001 - never let a model check stop the chat from starting
+            return
+        for item in stale:
+            if item.suggestion:
+                runtime.router.catalog.remember_swap(item.key_id, item.model, item.suggestion)
+            if not interactive:
+                continue
+            if item.suggestion:
+                ui.info(f"key {item.key_id} pins model '{item.model}', which the provider no longer lists: using "
+                        f"'{item.suggestion}' for now. Make it permanent with /models --fix")
+            else:
+                ui.error(f"key {item.key_id} pins model '{item.model}', which the provider no longer lists, and no "
+                         "replacement could be chosen. Edit `models:` in the config, or set it to auto.")
+
     try:
+        check_pinned_models()
         if prompt is not None:
             ok = run_turn(prompt)
             raise typer.Exit(0 if ok else 1)
@@ -786,7 +898,8 @@ def run_chat(ctx: typer.Context, model: str, workspace: Path | None, approval: s
                         ui.error("could not parse that: check your quotes")
                         continue
                     run_inline(ctx, INLINE_COMMANDS[command](parts))
-                    if command == "/keys" and parts and parts[0] in ("add", "remove", "enable", "disable"):
+                    if (command == "/keys" and parts and parts[0] in ("add", "remove", "enable", "disable")) \
+                            or (command == "/models" and "--fix" in parts):
                         reload_runtime()
                 elif command == "/clear":
                     agent.reset()

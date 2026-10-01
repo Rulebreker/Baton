@@ -20,17 +20,30 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import math
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 
 from .config import BatonConfig
 from .errors import AllKeysExhaustedError, ErrorKind, ProviderError
+from .models import ModelCatalog
 from .pool import KeyPool, KeyState
 from .providers import Provider
 from .providers.base import ChatRequest, ChatResult, StreamChunk, Usage, estimate_message_tokens, estimate_tokens
 from .redact import scrub
 
 log = logging.getLogger("baton.router")
+
+_CAUSE = {
+    ErrorKind.OVERLOADED.value: "provider overloaded (high demand)",
+    ErrorKind.MODEL_NOT_FOUND.value: "model not found or retired",
+    ErrorKind.AUTH.value: "key rejected",
+    ErrorKind.RATE_LIMIT.value: "rate limited",
+    ErrorKind.QUOTA_EXHAUSTED.value: "quota used up",
+    ErrorKind.TRANSIENT.value: "provider or network error",
+    ErrorKind.TIMEOUT.value: "timed out",
+    ErrorKind.UNKNOWN.value: "unexpected error",
+}
 
 # Reserve for the answer when the caller did not cap it.
 _DEFAULT_COMPLETION_RESERVE = 1024
@@ -72,12 +85,28 @@ class Router:
         providers: dict[str, Provider],
         *,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        catalog: ModelCatalog | None = None,
+        on_notice: Callable[[str], None] | None = None,
     ) -> None:
         self.config = config
         self.rotation = config.rotation
         self.pool = pool
         self.providers = providers
         self._sleep = sleep
+        self.catalog = catalog or ModelCatalog(providers, clock=pool.clock)
+        if pool.discovered is None:
+            pool.discovered = self.catalog.cached_models
+        # Told about things the user should see mid-request: a model swapped in, "provider busy".
+        self.on_notice = on_notice
+
+    def _notify(self, message: str) -> None:
+        message = scrub(message)
+        log.info("%s", message)
+        if self.on_notice is not None:
+            try:
+                self.on_notice(message)
+            except Exception:  # noqa: BLE001 - a broken UI hook must never break a request
+                log.debug("notice hook failed", exc_info=True)
 
     # --- shared pieces ------------------------------------------------------
 
@@ -88,6 +117,29 @@ class Router:
 
     def _max_attempts(self) -> int:
         return self.rotation.max_attempts or max(2, 2 * len(self.pool.keys))
+
+    def _budget_left(self, attempts: list[Attempt]) -> bool:
+        """Failed attempts are capped, except "provider overloaded" ones: those are bounded by the
+        time budget instead (`rotation.overload_max_wait`), since waiting is the point."""
+        counted = sum(1 for a in attempts if a.outcome != ErrorKind.OVERLOADED.value)
+        return counted < self._max_attempts() and len(attempts) < self._max_attempts() + 60
+
+    async def _recover_model(self, key: KeyState, pool_model: str, model: str, error: ProviderError,
+                             done: set[tuple[str, str]]) -> bool:
+        """The provider says `model` does not exist (any more). The key is fine: find a live
+        replacement once, remember it, and tell the user. True when a retry is worthwhile."""
+        tag = (key.id, pool_model)
+        if tag in done:
+            return False
+        done.add(tag)
+        replacement = await self.catalog.replacement(key, model, error.message)
+        if not replacement or replacement == model:
+            return False
+        self.catalog.remember_swap(key.id, pool_model, replacement)
+        if model != pool_model:
+            self.catalog.remember_swap(key.id, model, replacement)
+        self._notify(f"model '{model}' is no longer available for key {key.id}; using '{replacement}' instead")
+        return True
 
     def _check_model(self, request: ChatRequest) -> None:
         if self.rotation.unknown_model == "reject" and not self.pool.model_is_known(request.model):
@@ -125,7 +177,7 @@ class Router:
             max_tokens = cap
         return dataclasses.replace(request, model=model, max_tokens=max_tokens)
 
-    def _exhausted(self, attempts: list[Attempt], context_blocked: bool) -> Exception:
+    def _exhausted(self, attempts: list[Attempt], context_blocked: bool, waited: float = 0.0) -> Exception:
         if context_blocked and not any(a.outcome != ErrorKind.CONTEXT_LENGTH.value for a in attempts):
             return ProviderError(
                 ErrorKind.CONTEXT_LENGTH,
@@ -134,8 +186,21 @@ class Router:
             )
         retry_after = self.pool.next_available_in()
         total = len(self.pool.keys)
+        # Each key's most recent failure: the message must describe what really happened to
+        # *each* key, not guess one cause for all of them.
+        kinds = {key.id: key.last_kind for key in self.pool.keys.values() if key.last_kind}
+        present = set(kinds.values())
+        covered = total > 0 and len(kinds) == total
         if total == 0:
             message = "No API keys are configured. Run `baton keys add`."
+        elif covered and present == {ErrorKind.OVERLOADED.value}:
+            message = (f"The provider is overloaded right now (high demand): all {total} key(s) were busy, and Baton "
+                       f"stopped retrying after waiting {int(waited)}s. Your keys are fine; try again in a minute.")
+        elif covered and present == {ErrorKind.MODEL_NOT_FOUND.value}:
+            message = "No key can use the requested model: the provider says it does not exist or has been retired."
+        elif present & {ErrorKind.OVERLOADED.value, ErrorKind.MODEL_NOT_FOUND.value}:
+            parts = "; ".join(f"{key_id}: {_CAUSE.get(kind, kind)}" for key_id, kind in kinds.items())
+            message = f"No key could answer ({parts})."
         else:
             hint = f" Soonest recovery in about {int(retry_after) + 1}s." if retry_after is not None else ""
             message = f"All {total} API key(s) are exhausted, rate-limited or unhealthy.{hint}"
@@ -148,16 +213,28 @@ class Router:
             retry_after=retry_after,
             attempts=[f"{a.key_id}: {a.outcome}" for a in attempts],
             reasons=reasons,
+            kinds=kinds,
+            waited=waited,
         )
 
-    async def _wait_for_capacity(self, waited: float, pin: str | None) -> float | None:
-        """Sleep until a key recovers, if that is soon enough. Returns the time slept."""
+    async def _wait_for_capacity(self, waited: float, pin: str | None, skip: set[str] | frozenset[str] = frozenset()) -> float | None:
+        """Sleep until a key recovers, if that is soon enough. Returns the time slept.
+
+        When every key is out only because of a passing problem (provider busy, timeouts) the
+        budget is `rotation.overload_max_wait`; for quota windows it stays `max_queue_wait`.
+        Keys this request has already ruled out (`skip`) do not count either way."""
         if pin is not None:
             return None  # pinned calls (handoff summaries) must fail fast
-        wait = self.pool.next_available_in()
-        if wait is None or waited + wait > self.rotation.max_queue_wait:
+        wait = self.pool.next_available_in(skip)
+        if wait is None:
+            return None
+        passing = self.pool.waiting_on_temporary_only(skip)
+        budget = self.rotation.overload_max_wait if passing else self.rotation.max_queue_wait
+        if waited + wait > budget:
             return None
         wait = max(wait, 0.05) + 0.05
+        if passing:
+            self._notify(f"provider busy, retrying in {math.ceil(wait)}s ({int(waited)}s of {int(budget)}s used)...")
         await self._sleep(wait)
         return wait
 
@@ -189,22 +266,26 @@ class Router:
         skip = set(exclude)
         waited = 0.0
         context_blocked = False
+        swapped: set[tuple[str, str]] = set()   # (key, model) pairs already given their one re-resolution
+        favourite = prefer
 
-        while len(attempts) < self._max_attempts():
-            picked, too_big = self._pick(request, prompt_tokens, est_tokens, prefer, pin, skip)
+        while self._budget_left(attempts):
+            picked, too_big = self._pick(request, prompt_tokens, est_tokens, favourite, pin, skip)
             if picked is None:
                 if too_big:
                     context_blocked = True  # keys exist, but none can hold the prompt
                     break
-                slept = await self._wait_for_capacity(waited, pin)
+                slept = await self._wait_for_capacity(waited, pin, skip)
                 if slept is None:
                     break
                 waited += slept
                 continue
 
-            key, model = picked
+            key, pool_model = picked
+            model = await self.catalog.concrete(key, pool_model)
             provider = self.providers[key.config.provider]
             attempt_request = self._attempt_request(request, key, model)
+            favourite = prefer
             self.pool.reserve(key, est_tokens)
             try:
                 result = await asyncio.wait_for(
@@ -225,6 +306,12 @@ class Router:
                     # Another key may have a larger window; this one is out.
                     context_blocked = True
                     skip.add(key.id)
+                elif error.kind is ErrorKind.MODEL_NOT_FOUND:
+                    # The model is wrong, the key is fine: retry this key once with a live model.
+                    if await self._recover_model(key, pool_model, model, error, swapped):
+                        favourite = key.id
+                    else:
+                        skip.add(key.id)
                 continue
             finally:
                 self.pool.release(key, est_tokens)
@@ -233,7 +320,7 @@ class Router:
             attempts.append(Attempt(key.id, model, "ok"))
             return RouteResult(result, key.id, key.config.provider, model, attempts)
 
-        raise self._exhausted(attempts, context_blocked)
+        raise self._exhausted(attempts, context_blocked, waited)
 
     # --- streaming ----------------------------------------------------------
 
@@ -250,22 +337,26 @@ class Router:
         skip: set[str] = set()
         waited = 0.0
         context_blocked = False
+        swapped: set[tuple[str, str]] = set()
+        favourite = prefer
 
-        while len(attempts) < self._max_attempts():
-            picked, too_big = self._pick(request, prompt_tokens, est_tokens, prefer, None, skip)
+        while self._budget_left(attempts):
+            picked, too_big = self._pick(request, prompt_tokens, est_tokens, favourite, None, skip)
             if picked is None:
                 if too_big:
                     context_blocked = True
                     break
-                slept = await self._wait_for_capacity(waited, None)
+                slept = await self._wait_for_capacity(waited, None, skip)
                 if slept is None:
                     break
                 waited += slept
                 continue
 
-            key, model = picked
+            key, pool_model = picked
+            model = await self.catalog.concrete(key, pool_model)
             provider = self.providers[key.config.provider]
             attempt_request = self._attempt_request(request, key, model)
+            favourite = prefer
             self.pool.reserve(key, est_tokens)
             source = provider.stream(attempt_request, api_key=key.secret, base_url=str(key.config.base_url))
             committed = False      # has any content reached our caller?
@@ -315,6 +406,11 @@ class Router:
                 if error.kind is ErrorKind.CONTEXT_LENGTH:
                     context_blocked = True
                     skip.add(key.id)
+                elif error.kind is ErrorKind.MODEL_NOT_FOUND:
+                    if await self._recover_model(key, pool_model, model, error, swapped):
+                        favourite = key.id
+                    else:
+                        skip.add(key.id)
                 log.info("key '%s' failed before streaming began (%s); rotating", key.id, error.kind.value)
                 continue
             finally:
@@ -336,4 +432,4 @@ class Router:
                 on_route(RouteInfo(key.id, key.config.provider, model, attempts))  # empty but successful answer
             return
 
-        raise self._exhausted(attempts, context_blocked)
+        raise self._exhausted(attempts, context_blocked, waited)

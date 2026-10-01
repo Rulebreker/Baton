@@ -30,6 +30,8 @@ class ErrorKind(str, Enum):
     AUTH = "auth"                        # key revoked or wrong: disable, rotate
     TRANSIENT = "transient"              # 5xx / network: circuit-breaker strike, rotate
     TIMEOUT = "timeout"                  # treated like TRANSIENT
+    OVERLOADED = "overloaded"            # 503/529 "high demand": the provider is busy, not the key: back off and wait
+    MODEL_NOT_FOUND = "model_not_found"  # 404: the *model name* is wrong or retired; the key itself is fine
     CONTEXT_LENGTH = "context_length"    # prompt too big: compact, do not burn other keys
     BAD_REQUEST = "bad_request"          # caller's fault: never rotate, surface it
     UNKNOWN = "unknown"                  # be conservative: strike, rotate
@@ -44,7 +46,14 @@ class ErrorKind(str, Enum):
             ErrorKind.TRANSIENT,
             ErrorKind.TIMEOUT,
             ErrorKind.UNKNOWN,
+            ErrorKind.OVERLOADED,
+            ErrorKind.MODEL_NOT_FOUND,
         }
+
+    @property
+    def temporary(self) -> bool:
+        """True when the problem goes away by itself, so waiting is the right response."""
+        return self in {ErrorKind.OVERLOADED, ErrorKind.TRANSIENT, ErrorKind.TIMEOUT}
 
 
 class ProviderError(BatonError):
@@ -82,10 +91,15 @@ class AllKeysExhaustedError(BatonError):
         retry_after: float | None = None,
         attempts: list[str] | None = None,
         reasons: list[str] | None = None,
+        kinds: dict[str, str] | None = None,
+        waited: float = 0.0,
     ) -> None:
         super().__init__(message)
         self.retry_after = retry_after
         self.attempts = attempts or []
+        # key id -> ErrorKind value of that key's most recent failure (the real mix of causes).
+        self.kinds = kinds or {}
+        self.waited = waited
         # Scrubbed "key: what the provider said" lines. Kept out of `message` so the
         # proxy does not relay upstream error text to its clients; the terminal shows them.
         self.reasons = reasons or []
