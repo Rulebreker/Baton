@@ -51,12 +51,29 @@ async def test_read_write_edit_roundtrip(box):
     assert [name for name, _ in approvals.asked] == ["write_file", "edit_file"]
 
 
-@pytest.mark.parametrize("path", ["../outside.txt", "..\\outside.txt", "src/../../outside.txt"])
+@pytest.mark.parametrize("path", [
+    "../outside.txt",
+    "src/../../outside.txt",
+    pytest.param("..\\outside.txt", marks=pytest.mark.skipif(
+        sys.platform != "win32", reason="backslash is a path separator only on Windows; POSIX case is tested below")),
+])
 async def test_paths_cannot_escape_the_workspace(box, path):
     toolbox, _, _ = box
     result = await toolbox.run("read_file", {"path": path})
     assert not result.ok and "outside the workspace" in result.output
     assert not (await toolbox.run("write_file", {"path": path, "content": "x"})).ok
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="on Windows a backslash is a separator (covered above)")
+async def test_backslash_path_stays_inside_the_workspace_on_posix(box, tmp_path):
+    """On POSIX `..\\outside.txt` is an ordinary file *name*, not a traversal.
+    It must therefore resolve inside the workspace and never touch the parent."""
+    toolbox, _, workspace = box
+    resolved = toolbox.resolve("..\\outside.txt")
+    assert resolved.parent == workspace.resolve()
+    assert (await toolbox.run("write_file", {"path": "..\\outside.txt", "content": "x"})).ok
+    assert (workspace / "..\\outside.txt").read_text(encoding="utf-8") == "x"
+    assert (tmp_path / "outside.txt").read_text(encoding="utf-8") == "outside"     # the real parent file is untouched
 
 
 async def test_absolute_paths_outside_are_refused(box, tmp_path):

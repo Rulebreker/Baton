@@ -322,6 +322,12 @@ class Toolbox:
             _kill_tree(process)
             if isinstance(exc, asyncio.CancelledError):
                 raise
+            # Reap the killed child. Without this a POSIX system keeps it as a
+            # zombie for the lifetime of the agent, one per timed-out command.
+            try:
+                await asyncio.wait_for(process.wait(), timeout=5)
+            except (asyncio.TimeoutError, OSError):
+                pass
             raise ToolError(f"command timed out after {int(limit)}s and was killed") from None
         output = raw.decode("utf-8", errors="replace")
         return f"{output}\n[exit code {process.returncode}]", f"exit {process.returncode}"

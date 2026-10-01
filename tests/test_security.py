@@ -5,6 +5,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import logging
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -12,6 +14,7 @@ import pytest
 from baton.config import load_config, load_dotenv, parse_config, save_config
 from baton.errors import ConfigError, VaultError
 from baton.logging_setup import RedactingFilter, setup_logging
+from baton.paths import ensure_private_dir, secure_write
 from baton.redact import Redactor, get_redactor, mask_secret
 from baton.vault import Vault, hash_token
 
@@ -102,6 +105,48 @@ def test_log_records_are_scrubbed_including_tracebacks(tmp_path):
 def test_redacting_filter_survives_bad_format_strings():
     record = logging.LogRecord("x", logging.INFO, __file__, 1, "broken %s %s", ("only-one",), None)
     assert RedactingFilter().filter(record) is True
+
+
+# --- file permissions (POSIX only: chmod is a no-op on Windows) --------------
+
+posix_only = pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits do not exist on Windows; "
+                                                           "there Baton relies on the user profile's ACLs")
+
+
+def mode_of(path: Path) -> int:
+    return stat.S_IMODE(path.stat().st_mode)
+
+
+@posix_only
+def test_secure_write_creates_owner_only_files_and_private_new_directories(tmp_path):
+    target = tmp_path / "new-dir" / "secret.bin"
+    secure_write(target, b"data")
+    assert mode_of(target) == 0o600
+    assert mode_of(target.parent) == 0o700
+    secure_write(target, b"replaced")                           # overwrite keeps it private
+    assert mode_of(target) == 0o600 and target.read_bytes() == b"replaced"
+    assert [p.name for p in target.parent.iterdir()] == ["secret.bin"]   # no temp files left behind
+
+
+@posix_only
+def test_secure_write_does_not_change_permissions_of_an_existing_directory(tmp_path):
+    shared = tmp_path / "project"
+    shared.mkdir()
+    shared.chmod(0o755)
+    secure_write(shared / "baton.yaml", b"keys: []\n")
+    assert mode_of(shared) == 0o755
+    assert mode_of(shared / "baton.yaml") == 0o600
+
+
+@posix_only
+def test_vault_keyfile_and_data_directory_are_private(tmp_path, monkeypatch):
+    monkeypatch.setattr("baton.vault._keyring", lambda: None)
+    home = ensure_private_dir(tmp_path / "home")
+    vault = Vault.create(home / "keys.vault")
+    vault.set_key("a", "value-123456789")
+    assert mode_of(home) == 0o700
+    for name in ("keys.vault", "master.key"):
+        assert mode_of(home / name) == 0o600, name
 
 
 # --- vault ------------------------------------------------------------------

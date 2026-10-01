@@ -46,7 +46,12 @@ def secure_write(path: Path, data: bytes) -> None:
     crash or power cut leaves either the old file or the new one, never a
     truncated vault or half-written usage state.
     """
-    ensure_private_dir(path.parent)
+    # Only a directory we create ourselves is made private. An existing parent
+    # is left alone: with `--config /some/project/baton.yaml` the parent is
+    # the user's own directory, and silently chmod-ing it to 0700 would be a
+    # nasty side effect (it only ever happened on POSIX, where chmod is real).
+    if not path.parent.is_dir():
+        ensure_private_dir(path.parent)
     fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as handle:  # mkstemp creates the file 0600
