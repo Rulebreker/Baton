@@ -84,6 +84,18 @@ class KeyState:
         return mask_secret(self.secret)
 
 
+def clear_parked_state(state_path: Path, key_id: str) -> None:
+    """Forget a key's persisted "parked" timers (used by `baton keys enable`),
+    so a key the user has just fixed is tried again immediately."""
+    try:
+        data = json.loads(state_path.read_text(encoding="utf-8"))
+        entry = data["keys"][key_id]
+        entry["exhausted_until"] = entry["disabled_until"] = 0.0
+        secure_write(state_path, json.dumps(data).encode("utf-8"))
+    except (OSError, ValueError, KeyError, TypeError):
+        pass  # no state yet, or nothing recorded for this key
+
+
 def _utc_day(now: float) -> str:
     return time.strftime("%Y-%m-%d", time.gmtime(now))
 
