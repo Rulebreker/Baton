@@ -16,7 +16,7 @@ keys:
   # Free-tier keys from several teammates. Add as many as you like.
   - id: gemini-alice
     provider: gemini              # gemini | openai | anthropic | openai_compatible
-    models: [gemini-2.5-flash]    # first entry is the key's default model
+    models: [gemini-3.8-flash]    # first entry is the key's default model
     limits:                       # check your provider's current free-tier numbers
       rpm: 10                     # requests per minute
       rpd: 250                    # requests per day   <- enables planned handoff at 90%
@@ -25,7 +25,7 @@ keys:
 
   - id: gemini-bob
     provider: gemini
-    models: [gemini-2.5-flash]
+    models: [gemini-3.8-flash]
     limits: {rpm: 10, rpd: 250, tpm: 250000}
     secret: env:GEMINI_KEY_BOB
 
@@ -60,7 +60,7 @@ keys:
 # Map each alias to a model per provider (or per key id).
 model_aliases:
   fast:
-    gemini: gemini-2.5-flash
+    gemini: gemini-3.8-flash
     openai: gpt-4o-mini
     groq-carol: llama-3.3-70b-versatile
 

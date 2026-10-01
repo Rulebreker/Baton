@@ -83,7 +83,7 @@ def test_simple_wizard_only_asks_for_provider_and_key(home):
     assert "Default model" not in result.output and "Requests per" not in result.output
     key = load_config(home / "config.yaml").keys[0]
     assert (key.id, key.provider) == ("gemini-1", "gemini")
-    assert key.models[0] == "gemini-2.5-flash" and len(key.models) > 1      # extra models feed the /model menu
+    assert key.models[0] == "gemini-3.8-flash"
     assert CREDENTIAL not in result.output
 
 

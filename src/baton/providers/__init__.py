@@ -25,7 +25,7 @@ class ProviderDefaults:
 PROVIDER_DEFAULTS: dict[str, ProviderDefaults] = {
     "openai": ProviderDefaults("https://api.openai.com/v1", "gpt-4o-mini", 128_000),
     "anthropic": ProviderDefaults("https://api.anthropic.com", "claude-opus-5-5", 1_000_000),
-    "gemini": ProviderDefaults("https://generativelanguage.googleapis.com/v1beta", "gemini-2.5-flash", 1_000_000),
+    "gemini": ProviderDefaults("https://generativelanguage.googleapis.com/v1beta", "gemini-3.8-flash", 1_000_000),
     "openai_compatible": ProviderDefaults(None, "", 32_000),
 }
 
@@ -34,7 +34,7 @@ PROVIDER_DEFAULTS: dict[str, ProviderDefaults] = {
 SUGGESTED_MODELS: dict[str, list[str]] = {
     "openai": ["gpt-4o-mini", "gpt-4o"],
     "anthropic": ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5-20251001"],
-    "gemini": ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite"],
+    "gemini": ["gemini-3.8-flash"],
     "openai_compatible": [],
 }
 

@@ -90,7 +90,7 @@ Manager, macOS Keychain, Secret Service) when you choose keyfile mode.
   | exit 0
 Validation is in place and the 31 tests pass.
 ~ handed off gemini-alice -> gemini-bob (summary: model)
-gemini-bob | gemini-2.5-flash | day 3% | 5/6 keys ready
+gemini-bob | gemini-3.8-flash | day 3% | 5/6 keys ready
 ```
 
 The agent works inside one directory (the current one, or `--workspace PATH`). It can read, search,
