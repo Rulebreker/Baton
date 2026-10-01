@@ -238,6 +238,12 @@ def test_config_save_and_load_roundtrip(tmp_path):
         load_config(tmp_path / "broken.yaml")
 
 
+def test_shipped_sample_config_is_valid():
+    config = load_config(ROOT / "baton.example.yaml")
+    assert len(config.keys) >= 5 and config.proxy.host == "127.0.0.1"
+    assert all(key.secret == "vault" or key.secret.startswith("env:") for key in config.keys)
+
+
 def test_dotenv_loader_never_overrides_real_environment(tmp_path, monkeypatch):
     env = tmp_path / ".env"
     env.write_text('# comment\nexport BATON_T_ONE="from-file"\nBATON_T_TWO=from-file\n\nnot a pair\n', encoding="utf-8")

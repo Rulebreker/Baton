@@ -1,0 +1,107 @@
+# Baton sample configuration.
+#
+# Copy to ~/.baton/config.yaml (or to ./baton.yaml, which is git-ignored), or
+# simply run `baton init` and let the wizard write it.
+#
+# This file holds SETTINGS ONLY. An API key must never appear here: each key
+# entry says where its secret lives:
+#     secret: vault          -> encrypted vault (add with `baton keys add`)
+#     secret: env:VAR_NAME   -> environment variable / .env file
+# Unknown fields (such as `api_key:`) are rejected when the file is loaded.
+
+version: 1
+
+keys:
+  # Free-tier keys from several teammates. Add as many as you like.
+  - id: gemini-alice
+    provider: gemini              # gemini | openai | anthropic | openai_compatible
+    models: [gemini-2.5-flash]    # first entry is the key's default model
+    limits:                       # check your provider's current free-tier numbers
+      rpm: 10                     # requests per minute
+      rpd: 250                    # requests per day   <- enables planned handoff at 90%
+      tpm: 250000                 # tokens per minute
+    # secret: vault               # default
+
+  - id: gemini-bob
+    provider: gemini
+    models: [gemini-2.5-flash]
+    limits: {rpm: 10, rpd: 250, tpm: 250000}
+    secret: env:GEMINI_KEY_BOB
+
+  - id: openai-team
+    provider: openai
+    models: [gpt-4o-mini, gpt-4o]
+    priority: 1                   # lower numbers are used first; 0 is the default
+    limits: {rpm: 500, tpm: 200000}
+
+  - id: claude-team
+    provider: anthropic
+    models: [claude-opus-5-5]
+    max_output_tokens: 8000
+    limits: {rpm: 50}
+
+  - id: groq-carol
+    provider: openai_compatible   # any OpenAI-style API: Groq, OpenRouter, Mistral, Ollama...
+    base_url: https://api.groq.com/openai/v1
+    models: [llama-3.3-70b-versatile]
+    context_window: 131072
+    limits: {rpm: 30, rpd: 1000, tpd: 100000}
+
+  - id: local-ollama
+    provider: openai_compatible
+    base_url: http://localhost:11434/v1   # plain http is accepted for loopback only
+    models: [llama3.2]
+    context_window: 8192
+    priority: 9                   # last resort
+    secret: env:OLLAMA_PLACEHOLDER_KEY
+
+# Friendly names clients can request instead of a provider-specific model.
+# Map each alias to a model per provider (or per key id).
+model_aliases:
+  fast:
+    gemini: gemini-2.5-flash
+    openai: gpt-4o-mini
+    groq-carol: llama-3.3-70b-versatile
+
+rotation:
+  handoff_threshold: 0.90         # daily-quota fraction at which a session plans its handoff
+  hard_limit: 0.98                # past this a key takes no new requests
+  strategy: sticky                # sticky (fill one key, then the next) | least_used | round_robin
+  cross_model_fallback: true      # serve with another key's default model if the requested one is unavailable
+  unknown_model: default          # default (map unknown model names to each key's default) | reject
+  request_timeout: 120
+  connect_timeout: 10
+  stream_idle_timeout: 90
+  max_queue_wait: 15              # seconds to wait for a key to recover before failing closed
+  breaker_threshold: 3            # consecutive failures before a key's circuit breaker opens
+  breaker_cooldown: 60
+
+handoff:
+  enabled: true
+  keep_recent_messages: 6         # newest messages carried verbatim; older ones are summarised
+  min_messages: 8                 # shorter conversations are carried over whole
+  summary_max_tokens: 1500
+  context_fill_ratio: 0.75        # also compact when the transcript fills this much of the context window
+  scrub_pii: true
+  save_checkpoints: true          # full pre-handoff transcript saved (scrubbed) under ~/.baton/checkpoints
+
+proxy:
+  host: 127.0.0.1                 # loopback only. Changing this ALSO requires allow_remote + `baton serve --expose`
+  port: 8787
+  allow_remote: false
+  rate_limit:
+    requests_per_minute: 120      # per client token
+    burst: 30
+  max_body_bytes: 10000000
+  cors_origins: []                # e.g. [http://localhost:3000] for a browser app; "*" is not accepted
+  compact_on_handoff: false       # true = the proxy may summarise long client histories on key handoff
+
+agent:
+  approval: ask                   # ask | auto_edit (edits automatic, commands ask) | auto (no prompts)
+  max_tool_iterations: 40
+  command_timeout: 120
+  show_handoffs: true             # print a one-line note when the session changes key
+
+logging:
+  level: INFO
+  redact_pii: true
