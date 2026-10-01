@@ -24,7 +24,8 @@ import math
 import re
 import subprocess
 import sys
-from typing import Iterable, NamedTuple
+from collections.abc import Iterable
+from typing import NamedTuple
 
 ALLOW_MARKER = "baton:allow-secret"
 MAX_SCAN_BYTES = 2 * 1024 * 1024  # larger blobs are flagged rather than scanned
@@ -138,7 +139,11 @@ def looks_like_placeholder(value: str) -> bool:
     lowered = value.lower()
     if any(word in lowered for word in ("example", "placeholder", "your", "changeme", "xxxx", "redacted", "dummy")):
         return True
-    return len(set(value)) <= 4  # e.g. "aaaaaaaaaaaaaaaaaaaa"
+    if len(set(value)) <= 4:  # e.g. "aaaaaaaaaaaaaaaaaaaa"
+        return True
+    # Lower-case words joined by "." or "_" are code (`self.config.max_tokens`),
+    # not credentials: real keys carry digits or mixed case.
+    return bool(re.fullmatch(r"[a-z_.]+", value))
 
 
 def scan_text(path: str, text: str) -> list[Finding]:

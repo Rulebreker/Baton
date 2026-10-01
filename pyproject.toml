@@ -1,0 +1,70 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "baton-relay"
+version = "0.1.0"
+description = "Pool a team's LLM API keys, rotate them automatically, and hand work off between keys without losing context."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["llm", "proxy", "openai", "gemini", "claude", "agent", "key-rotation"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+]
+dependencies = [
+    "httpx>=0.27,<1",
+    "pydantic>=2.6,<3",
+    "PyYAML>=6.0,<7",
+    "cryptography>=42",
+    "rich>=13.7",
+    "typer>=0.12",
+    "starlette>=0.37",
+    "uvicorn>=0.29",
+]
+
+[project.optional-dependencies]
+# OS keychain storage for the vault master key (Windows Credential Manager,
+# macOS Keychain, Secret Service). Optional because headless Linux boxes often
+# have no keyring backend.
+keyring = ["keyring>=24"]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+baton = "baton.cli.main:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/baton"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-q"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S"]
+ignore = [
+    "E501",  # line length is advisory here
+    "S101",  # asserts are fine in tests
+    "S105",  # flags names like PASSPHRASE_ENV; scripts/secret_scan.py is the real check
+    "S603",  # subprocess use is reviewed case by case (argument lists, never shell strings)
+    "S607",  # `git` is resolved from PATH by design
+    "B008",  # typer uses function calls in defaults
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S105", "S106", "S108"]
