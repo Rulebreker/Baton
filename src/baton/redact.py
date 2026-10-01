@@ -26,6 +26,7 @@ _SECRET_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("openrouter-key", re.compile(r"sk-or-(?:v1-)?[A-Za-z0-9]{24,}")),
     ("openai-key", re.compile(r"sk-(?:proj-|svcacct-)?[A-Za-z0-9_\-]{20,}")),
     ("google-key", re.compile(r"AIza[0-9A-Za-z_\-]{35}")),
+    ("google-key", re.compile(r"\bAQ\.[A-Za-z0-9_\-]{30,}")),   # newer Google API key format
     ("groq-key", re.compile(r"gsk_[A-Za-z0-9]{24,}")),
     ("hf-token", re.compile(r"hf_[A-Za-z0-9]{24,}")),
     ("xai-key", re.compile(r"xai-[A-Za-z0-9]{24,}")),

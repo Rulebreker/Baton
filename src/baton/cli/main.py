@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shlex
 import stat
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -35,7 +37,7 @@ from ..providers import PROVIDER_DEFAULTS, SUGGESTED_MODELS
 from ..providers.base import ChatRequest
 from ..redact import scrub
 from ..runtime import Runtime
-from ..vault import MIN_PASSPHRASE_LENGTH, PASSPHRASE_ENV, VAULT_FILE, Vault
+from ..vault import PASSPHRASE_ENV, VAULT_FILE, Vault
 from .select import can_use_menu, choose
 
 log = logging.getLogger("baton.cli")
@@ -213,6 +215,53 @@ async def test_key(runtime: Runtime, key_id: str) -> tuple[bool, str]:
         return False, str(exc)
 
 
+# --- chat helpers -----------------------------------------------------------
+
+# Slash commands that run the matching `baton ...` command without leaving the chat.
+INLINE_COMMANDS: dict[str, Callable[[list[str]], list[str]]] = {
+    "/keys": lambda parts: ["keys", *(parts or ["list"])],
+    "/token": lambda parts: ["token", *(parts or ["list"])],
+    "/doctor": lambda parts: ["doctor", *parts],
+    "/update": lambda parts: ["update"],
+    "/version": lambda parts: ["--version"],
+}
+
+
+def normalize_input(text: str) -> str:
+    """Accept what people naturally type at the chat prompt: `exit`, `quit`, and the shell form
+    `baton keys list` (which would otherwise be sent to the model as a message)."""
+    lowered = text.strip().lower()
+    if lowered in ("exit", "quit"):
+        return "/exit"
+    first, _, rest = text.strip().partition(" ")
+    if first.lower() == "baton" and rest.strip():
+        return "/" + rest.strip()
+    return text
+
+
+def run_inline(ctx: typer.Context, args: list[str]) -> None:
+    """Run `baton <args>` inside the running chat. Any failure is reported, never fatal."""
+    config = (ctx.obj or {}).get("config")
+    full = ([] if config is None else ["--config", str(config)]) + args
+    try:
+        typer.main.get_command(app).main(args=full, prog_name="baton", standalone_mode=False)
+    except (typer.Exit, SystemExit):
+        pass
+    except (typer.Abort, KeyboardInterrupt):
+        console.print("[dim]cancelled[/]")
+    except Exception as exc:  # noqa: BLE001 - e.g. a usage error such as a missing argument
+        console.print(f"[red]{escape(scrub(str(exc)) or type(exc).__name__)}[/]")
+
+
+def exhausted_hint(reasons: list[str]) -> str:
+    text = " ".join(reasons).lower()
+    if "404" in text:
+        return "The model name looks wrong or retired: pick another with /model, or fix it with /keys."
+    if "auth" in text or "401" in text or "403" in text or "api key not valid" in text:
+        return "A key was rejected: replace it with /keys remove NAME, then /keys add."
+    return "Check /status, add keys with /keys add, or try again in a moment."
+
+
 # --- root -------------------------------------------------------------------
 
 @app.callback(invoke_without_command=True)
@@ -254,24 +303,13 @@ def init(
     if vault_path.is_file():
         vault = open_vault(home)
     else:
-        choice = choose("How should your keys be protected?", [
-            ("passphrase", "Passphrase - strongest; you type it each time Baton starts (recommended)"),
-            ("keyfile", "No password - nothing to type; the key is kept in the OS keychain or a private file"),
-        ])
+        # No password to type: the vault is encrypted with a random key kept in the OS keychain,
+        # or in a private file next to it. (Vaults made earlier with a passphrase still open.)
         try:
-            if choice == "passphrase":
-                while True:
-                    passphrase = typer.prompt(f"New passphrase (min {MIN_PASSPHRASE_LENGTH} chars)", hide_input=True,
-                                              confirmation_prompt=True)
-                    if len(passphrase) >= MIN_PASSPHRASE_LENGTH:
-                        break
-                    console.print("[yellow]Too short.[/]")
-                vault = Vault.create(vault_path, passphrase=passphrase)
-            else:
-                vault = Vault.create(vault_path)
+            vault = Vault.create(vault_path)
         except VaultError as exc:
             fail(str(exc))
-        console.print("[green]Vault created.[/]\n")
+        console.print("[green]Encrypted key vault created.[/]\n")
     assert vault is not None  # noqa: S101 - open_vault exits on failure
 
     console.print("[bold]Add an API key[/] (you can add more later with `baton keys add`)")
@@ -488,8 +526,9 @@ def doctor(ctx: typer.Context) -> None:
             if target.is_file():
                 report(stat.S_IMODE(target.stat().st_mode) & 0o077 == 0, f"{name} is readable by the owner only")
     if (home / "master.key").is_file():
-        report(False, "vault key is stored in a file (keyfile mode): anyone who can read the data directory can "
-                      "decrypt the vault. Use passphrase mode or install `baton-relay[keyring]`.", warn=True)
+        report(False, "vault key is stored in a file (keyfile mode) because no OS keychain is available here: "
+                      "anyone who can read the data directory can decrypt the vault. Keep that directory private.",
+               warn=True)
 
     if config is not None:
         for key in config.keys:
@@ -517,6 +556,23 @@ def doctor(ctx: typer.Context) -> None:
 
     console.print("\n[green]No problems found.[/]" if not problems else f"\n[red]{problems} problem(s) found.[/]")
     if problems:
+        raise typer.Exit(1)
+
+
+# --- update -----------------------------------------------------------------
+
+@app.command()
+def update() -> None:
+    """Update Baton to the latest version (git pull for a checkout, pip upgrade otherwise)."""
+    from .update import run_update
+
+    with console.status("[dim]checking for updates[/]", spinner="dots"):
+        result = run_update()
+    colour = "green" if result.ok else "red"
+    console.print(f"[{colour}]{escape(result.message)}[/]")
+    if result.changed:
+        console.print("Restart Baton to use the new version.")
+    if not result.ok:
         raise typer.Exit(1)
 
 
@@ -658,7 +714,9 @@ def run_chat(ctx: typer.Context, model: str, workspace: Path | None, approval: s
             ui.info("turn cancelled")
         except AllKeysExhaustedError as exc:
             ui.error(str(exc))
-            ui.info("Your message was not sent. Add keys with `baton keys add`, or try again later.")
+            for reason in exc.reasons[:4]:
+                ui.info(f"  {reason[:220]}")
+            ui.info(f"Your message was not sent. {exhausted_hint(exc.reasons)}")
         except ProviderError as exc:
             ui.error(exc.message)
         except BatonError as exc:
@@ -667,6 +725,27 @@ def run_chat(ctx: typer.Context, model: str, workspace: Path | None, approval: s
             log.exception("unexpected error during agent turn")
             ui.error("unexpected error; details were written to the log file")
         return False
+
+    def reload_runtime() -> None:
+        """Pick up key changes (add/remove/enable/disable) without leaving the chat."""
+        nonlocal runtime
+        runtime.pool.save(force=True)
+        try:
+            fresh = build_runtime(ctx)
+        except (typer.Exit, SystemExit):
+            ui.info("keys were not reloaded; fix the problem above, or restart Baton")
+            return
+        old, runtime = runtime, fresh
+        agent.runtime = fresh
+        ui.pool = fresh.pool
+        loop.run_until_complete(old.client.aclose())
+        ui.info(f"keys reloaded: {len(fresh.pool.keys)} key(s) in the pool")
+
+    def toolbar() -> str:
+        key = agent.session.active_key or "no key used yet"
+        return f" {key}  ·  model {agent.session.model}  ·  approval {toolbox.approval_mode}  ·  type / for commands"
+
+    ui.set_toolbar(toolbar)
 
     try:
         if prompt is not None:
@@ -690,6 +769,7 @@ def run_chat(ctx: typer.Context, model: str, workspace: Path | None, approval: s
                 continue
             if not text:
                 continue
+            text = normalize_input(text)
             if text.startswith("/"):
                 command, _, argument = text.partition(" ")
                 argument = argument.strip()
@@ -697,8 +777,17 @@ def run_chat(ctx: typer.Context, model: str, workspace: Path | None, approval: s
                     break
                 if command == "/help":
                     console.print(HELP)
-                elif command in ("/status", "/keys"):
+                elif command == "/status":
                     ui.show_status()
+                elif command in INLINE_COMMANDS:
+                    try:
+                        parts = shlex.split(argument)
+                    except ValueError:
+                        ui.error("could not parse that: check your quotes")
+                        continue
+                    run_inline(ctx, INLINE_COMMANDS[command](parts))
+                    if command == "/keys" and parts and parts[0] in ("add", "remove", "enable", "disable"):
+                        reload_runtime()
                 elif command == "/clear":
                     agent.reset()
                     ui.info("conversation cleared")

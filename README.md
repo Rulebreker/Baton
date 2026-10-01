@@ -62,21 +62,24 @@ pip install -e .
 baton init
 ```
 
-`baton init` is a short wizard. You pick how to protect the vault and your provider from a list (arrow keys
-and Enter), then paste the API key (input is hidden) and optionally test it with one tiny request. Key
-name, models and quota limits are chosen for you; add `--advanced` to set them yourself. Then:
+`baton init` is a short wizard with no password to remember. You pick your provider from a list (arrow keys
+and Enter), paste the API key (input is hidden) and optionally test it with one tiny request. Key name,
+models and quota limits are chosen for you; add `--advanced` to set them yourself. The vault is encrypted
+with a random key that Baton keeps in the OS keychain (Windows Credential Manager, macOS Keychain, Secret
+Service), or in a private file where no keychain exists. Then:
 
 ```text
 baton                 start the agent in the current directory
 baton serve           start the OpenAI-compatible endpoint on 127.0.0.1:8787
 baton status          key health and quota usage
 baton doctor          check the setup for configuration and security problems
+baton update          update Baton to the latest version
 baton keys add        add another key        (also: list, remove, enable, disable, test)
 baton token new NAME  create a proxy token   (also: list, revoke)
 ```
 
-Optional: `pip install -e ".[keyring]"` stores the vault key in the OS keychain (Windows Credential
-Manager, macOS Keychain, Secret Service) when you choose keyfile mode.
+Every one of these also works **inside the agent** as a slash command (`/keys add`, `/doctor`, `/update`,
+...), so you never have to quit a conversation to manage keys.
 
 ## The terminal agent
 
@@ -98,13 +101,21 @@ write and edit files there and run shell commands. By default it **asks before e
 command**; choose `--approval auto_edit` to stop asking about edits, or `--approval auto` to stop asking
 altogether (only in a throwaway environment).
 
+Type `/` and a menu of commands appears as you type; the bar under the prompt shows the active key,
+model and approval mode. `exit`, and shell-style input such as `baton keys list`, are understood too.
+
 | Command | Effect |
 | --- | --- |
+| `/help` | list every command |
+| `/model` | pick a model from a list with the arrow keys (or `/model NAME`; `auto` uses each key's default) |
 | `/status` | key pool table with per-minute and per-day usage |
+| `/keys` | list keys. Also `/keys add`, `/keys test [ID]`, `/keys remove ID`, `/keys enable ID`, `/keys disable ID`; changes apply immediately |
+| `/token` | list proxy tokens (`/token new NAME` creates one) |
+| `/doctor` | check the setup for problems |
+| `/update` | update Baton (fast-forward `git pull` for a checkout, `pip install --upgrade` otherwise); restart to use it |
+| `/approval MODE` | `ask`, `auto_edit` or `auto` |
 | `/handoff` | summarise the conversation now and continue from the summary |
 | `/clear` | start a new conversation |
-| `/model` | pick a model from a list with the arrow keys (or `/model NAME`; `auto` uses each key's default) |
-| `/approval MODE` | `ask`, `auto_edit` or `auto` |
 | `/exit` | quit (Ctrl+D also works). Ctrl+C cancels the current turn only |
 
 One-shot use for scripts: `baton chat -p "summarise the TODOs in this repo"`. With no terminal attached
@@ -281,9 +292,13 @@ written for people who will change the code. If you add a feature, keep these pr
   share.
 - **Anyone with a proxy token can spend the pool's quota.** Treat tokens like API keys and revoke with
   `baton token revoke`.
-- **Keyfile mode is convenience, not strong protection.** If the vault key sits in `master.key`, anyone
-  who can read the data directory can decrypt the vault. `baton doctor` warns about this. Use passphrase
-  mode, or install the `keyring` extra.
+- **Without an OS keychain the vault key sits in `master.key`.** Anyone who can read the data directory
+  can then decrypt the vault, so keep it private; `baton doctor` warns when this is the case. Where a
+  keychain exists (Windows, macOS, most Linux desktops) the key is kept there instead. Vaults created
+  earlier with a passphrase still work and still ask for it (or `BATON_PASSPHRASE`).
+- **The chat prompt keeps no history file.** Up-arrow recall lasts for the session only, so a key
+  pasted into the prompt by mistake is not written to disk by Baton (your terminal's own scrollback and
+  the model provider still see what you send; revoke such a key).
 - **Windows file permissions.** POSIX gets `0700`/`0600`. On Windows Baton relies on your user profile's
   ACLs; do not put `BATON_HOME` on a shared drive.
 - **Memory.** Decrypted keys live in process memory while Baton runs. Python cannot reliably wipe
@@ -319,7 +334,7 @@ Report vulnerabilities privately: see [SECURITY.md](SECURITY.md).
 
 | Symptom | Cause and fix |
 | --- | --- |
-| `All N API key(s) are exhausted, rate-limited or unhealthy` | The pool really is spent. `baton status` shows each key's state and when it retries. Add keys or wait. |
+| `All N API key(s) are exhausted, rate-limited or unhealthy` | Baton prints each key's last error under this line. `404` means the model name is wrong or retired (`/model`, or edit `models:` in the config); `auth`/`401`/`403` means the key is bad (`/keys remove ID`, then `/keys add`); otherwise the pool really is spent: `/status` shows when keys retry. |
 | A key shows `disabled` | The provider rejected it (401/403). Check the key, then `baton keys enable ID`. It is re-probed hourly anyway. |
 | No planned handoff ever happens | The key has no `rpd`/`tpd` limit configured. `baton doctor` lists such keys. |
 | `401 missing or invalid Baton token` | The client is sending its old provider key. Use the token from `baton token new`. |

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -15,19 +16,43 @@ from .. import __version__
 from ..agent.tools import ToolResult
 from ..pool import KeyPool
 from ..session import SessionEvent
+from .select import can_use_menu
 
 _STATUS_STYLE = {"ready": "green", "draining": "yellow", "cooldown": "yellow", "exhausted": "red", "disabled": "red"}
 
-HELP = """[bold]Commands[/]
-  /help              show this help
-  /status            key pool status and quota usage
-  /handoff           summarise the conversation now and continue from the summary
-  /clear             start a new conversation
-  /model             pick a model from a list (or `/model NAME`; 'auto' uses each key's default)
-  /approval MODE     ask | auto_edit | auto
-  /exit              quit (Ctrl+D also works)
+# Every slash command, shown in the dropdown while typing "/" and listed by /help.
+# The ones marked `cli` run the matching `baton ...` command without leaving the chat.
+SLASH_COMMANDS: list[tuple[str, str]] = [
+    ("/help", "show all commands"),
+    ("/model", "pick a model from a list"),
+    ("/status", "key pool status and quota usage"),
+    ("/keys", "list your API keys"),
+    ("/keys add", "add an API key"),
+    ("/keys test", "send a tiny test request through each key"),
+    ("/keys remove", "remove a key:  /keys remove NAME"),
+    ("/keys enable", "put a key back in rotation:  /keys enable NAME"),
+    ("/keys disable", "take a key out of rotation:  /keys disable NAME"),
+    ("/token", "list proxy tokens"),
+    ("/token new", "create a proxy token:  /token new NAME"),
+    ("/doctor", "check the setup for problems"),
+    ("/update", "update Baton to the latest version"),
+    ("/approval", "ask | auto_edit | auto  (when the agent asks before acting)"),
+    ("/handoff", "summarise the conversation now and continue from the summary"),
+    ("/clear", "start a new conversation"),
+    ("/exit", "quit (Ctrl+D also works)"),
+]
 
-End a line with \\ to continue typing on the next line. Ctrl+C cancels the current turn."""
+def slash_matches(text: str) -> list[tuple[str, str]]:
+    """Commands to offer for what has been typed so far (only a line that starts with "/")."""
+    if not text.startswith("/") or "\n" in text:
+        return []
+    return [(name, description) for name, description in SLASH_COMMANDS
+            if name.startswith(text.lower()) and name != text.lower()]
+
+
+HELP = "[bold]Commands[/]  [dim](type / to see them as you type)[/]\n" + "\n".join(
+    f"  {name:<15}{escape(description)}" for name, description in SLASH_COMMANDS
+) + "\n\nEnd a line with \\ to continue typing on the next line. Ctrl+C cancels the current turn."
 
 
 def keys_table(pool: KeyPool) -> Table:
@@ -61,9 +86,12 @@ class TerminalUI:
         self.active_key: str | None = None
         self._streaming = False
         self._status = None
+        self._session = None
+        self._toolbar: Callable[[], str] | None = None
         # Plain ASCII markers on consoles that cannot encode the nicer ones.
         fancy = (console.encoding or "").lower().startswith("utf") and not console.options.legacy_windows
         self.bullet, self.elbow, self.arrow = ("●", "⎿", "→") if fancy else ("*", "|", "->")
+        self.chevron = "❯" if fancy else ">"
 
     # --- chrome -------------------------------------------------------------
 
@@ -78,14 +106,61 @@ class TerminalUI:
         )
         self.console.print(Panel(body, border_style="cyan", expand=False))
 
+    def set_toolbar(self, render: Callable[[], str]) -> None:
+        """`render` returns the text of the status bar under the prompt."""
+        self._toolbar = render
+
+    def _make_session(self):
+        """A prompt_toolkit session: slash-command dropdown, arrow-key editing, status bar.
+
+        History is kept in memory only: a key pasted into the prompt by mistake must not
+        end up in a history file on disk.
+        """
+        from prompt_toolkit import PromptSession
+        from prompt_toolkit.completion import Completer, Completion
+        from prompt_toolkit.history import InMemoryHistory
+        from prompt_toolkit.styles import Style
+
+        class SlashCompleter(Completer):
+            def get_completions(self, document, complete_event):
+                text = document.text_before_cursor
+                for name, description in slash_matches(text):
+                    yield Completion(name, start_position=-len(text), display_meta=description)
+
+        style = Style.from_dict({
+            "bottom-toolbar": "noreverse fg:ansibrightblack bg:default",
+            "completion-menu.completion": "bg:#2b2b2b fg:ansiwhite",
+            "completion-menu.completion.current": "bg:ansicyan fg:ansiblack",
+            "completion-menu.meta.completion": "bg:#2b2b2b fg:ansibrightblack",
+            "completion-menu.meta.completion.current": "bg:ansicyan fg:ansiblack",
+        })
+        return PromptSession(
+            completer=SlashCompleter(),
+            complete_while_typing=True,
+            history=InMemoryHistory(),
+            bottom_toolbar=lambda: self._toolbar() if self._toolbar else "",
+            style=style,
+            reserve_space_for_menu=8,
+        )
+
     def prompt(self) -> str:
         lines: list[str] = []
-        prefix = "[bold cyan]>[/] "
+        first = True
+        use_session = can_use_menu()
+        if use_session and self._session is None:
+            try:
+                self._session = self._make_session()
+            except Exception:  # noqa: BLE001 - a terminal prompt_toolkit cannot drive: use plain input
+                use_session = False
         while True:
-            line = self.console.input(prefix)
+            if use_session and self._session is not None:
+                marker = self.chevron if first else "·"
+                line = self._session.prompt([("bold fg:ansicyan", f"{marker} ")])
+            else:
+                line = self.console.input("[bold cyan]>[/] " if first else "[dim].[/] ")
             if line.endswith("\\"):
                 lines.append(line[:-1])
-                prefix = "[dim].[/] "
+                first = False
                 continue
             lines.append(line)
             return "\n".join(lines).strip()

@@ -56,6 +56,23 @@ async def test_fails_closed_when_every_key_is_dead(harness):
     assert all(secret_for(i) not in " ".join(caught.value.attempts) for i in range(4))
 
 
+async def test_exhausted_error_carries_the_providers_reasons_but_not_in_its_message(harness):
+    """A retired model name (404) used to look like "keys exhausted" with no clue why."""
+    h = harness(2)
+    for index in range(2):
+        h.provider.always(index, ProviderError(ErrorKind.UNKNOWN, "gemini returned HTTP 404: models/yes is not found",
+                                               status=404))
+    with pytest.raises(AllKeysExhaustedError) as caught:
+        await h.router.complete(request())
+    assert any("404" in reason and "k0" in reason for reason in caught.value.reasons)
+    assert "404" not in str(caught.value)          # the proxy relays the message; upstream text stays out of it
+
+    # Next call: nothing is tried (keys are benched), but the reasons come from the pool.
+    with pytest.raises(AllKeysExhaustedError) as again:
+        await h.router.complete(request())
+    assert any("404" in reason for reason in again.value.reasons)
+
+
 async def test_attempts_are_bounded_even_if_keys_keep_failing(harness):
     h = harness(3, rotation={"backoff_base": 0.01, "backoff_max": 0.02, "max_queue_wait": 600, "breaker_threshold": 50})
     for index in range(3):

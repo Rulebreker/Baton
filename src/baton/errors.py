@@ -75,7 +75,17 @@ class ProviderError(BatonError):
 class AllKeysExhaustedError(BatonError):
     """No key can serve the request right now. Baton fails closed."""
 
-    def __init__(self, message: str, *, retry_after: float | None = None, attempts: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        retry_after: float | None = None,
+        attempts: list[str] | None = None,
+        reasons: list[str] | None = None,
+    ) -> None:
         super().__init__(message)
         self.retry_after = retry_after
         self.attempts = attempts or []
+        # Scrubbed "key: what the provider said" lines. Kept out of `message` so the
+        # proxy does not relay upstream error text to its clients; the terminal shows them.
+        self.reasons = reasons or []

@@ -61,6 +61,7 @@ PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("Anthropic API key", re.compile(r"sk-ant-[A-Za-z0-9_\-]{20,}")),
     ("OpenAI API key", re.compile(r"sk-(?:proj-|svcacct-)?[A-Za-z0-9_\-]{32,}")),
     ("Google API key", re.compile(r"AIza[0-9A-Za-z_\-]{35}")),
+    ("Google API key (new format)", re.compile(r"\bAQ\.[A-Za-z0-9_\-]{30,}")),
     ("Groq API key", re.compile(r"gsk_[A-Za-z0-9]{40,}")),
     ("OpenRouter API key", re.compile(r"sk-or-(?:v1-)?[A-Za-z0-9]{40,}")),
     ("Hugging Face token", re.compile(r"hf_[A-Za-z0-9]{30,}")),

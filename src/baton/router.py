@@ -139,10 +139,15 @@ class Router:
         else:
             hint = f" Soonest recovery in about {int(retry_after) + 1}s." if retry_after is not None else ""
             message = f"All {total} API key(s) are exhausted, rate-limited or unhealthy.{hint}"
+        reasons = list(dict.fromkeys(f"{a.key_id}: {a.detail}" for a in attempts if a.outcome != "ok" and a.detail))
+        if not reasons:
+            # Nothing was tried in this call: the keys were already benched by earlier failures.
+            reasons = [f"{row['id']}: {row['last_error']}" for row in self.pool.snapshot() if row["last_error"]]
         return AllKeysExhaustedError(
             message,
             retry_after=retry_after,
             attempts=[f"{a.key_id}: {a.outcome}" for a in attempts],
+            reasons=reasons,
         )
 
     async def _wait_for_capacity(self, waited: float, pin: str | None) -> float | None:

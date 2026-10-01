@@ -43,6 +43,15 @@ async def test_trailing_usage_chunk_reaches_stream_consumers(harness):
     assert h.key(0).day_tokens == 34                        # and the pool counted the real usage
 
 
+def test_newer_google_key_format_is_redacted_even_when_never_registered():
+    """A key pasted into the wrong prompt is not in the vault, so only the pattern can catch it."""
+    from baton.redact import scrub
+
+    pasted = "AQ." + "Ab8RN6J" * 6
+    assert pasted not in scrub(f"Provider: {pasted}")
+    assert "[REDACTED:google-key]" in scrub(f"key={pasted}")
+
+
 def test_enabling_a_key_clears_its_persisted_parking(tmp_path, harness):
     from baton.errors import ErrorKind
     from baton.pool import KeyStatus

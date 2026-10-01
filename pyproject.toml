@@ -24,6 +24,10 @@ dependencies = [
     "cryptography>=42",
     "rich>=13.7",
     "questionary>=2.0",
+    "prompt_toolkit>=3.0",
+    # Keeps the vault's master key in the OS keychain when one exists (Windows Credential
+    # Manager, macOS Keychain, Secret Service); headless boxes fall back to a private file.
+    "keyring>=24",
     "typer>=0.12",
     "starlette>=0.37",
     "uvicorn>=0.29",

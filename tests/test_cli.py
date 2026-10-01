@@ -30,7 +30,6 @@ def home(tmp_path, monkeypatch):
 
 def run_init():
     answers = [
-        "2",                        # vault protection: no password (keyfile)
         "openai_compatible",        # provider (the option's number or its value)
         "",                         # key name (default)
         "http://127.0.0.1:9/v1",    # base URL
@@ -77,10 +76,11 @@ def test_init_wizard_creates_vault_config_and_token(home):
 
 
 def test_simple_wizard_only_asks_for_provider_and_key(home):
-    answers = ["2", "1", CREDENTIAL, "n", "n"]   # no password, Gemini (option 1), key, no more keys, no test
+    answers = ["1", CREDENTIAL, "n", "n"]        # Gemini (option 1), key, no more keys, no test
     result = runner.invoke(app, ["init"], input="\n".join(answers) + "\n")
     assert result.exit_code == 0, result.output
     assert "Default model" not in result.output and "Requests per" not in result.output
+    assert "passphrase" not in result.output.lower()                        # nothing to type, ever
     key = load_config(home / "config.yaml").keys[0]
     assert (key.id, key.provider) == ("gemini-1", "gemini")
     assert key.models[0] == "gemini-3.8-flash"
@@ -115,6 +115,49 @@ def test_commands_after_setup(home):
     removed = runner.invoke(app, ["keys", "remove", "openai-compatible-1", "--yes"])
     assert removed.exit_code == 0 and not load_config(home / "config.yaml").keys
     assert Vault.open(home / "keys.vault").get_key("openai-compatible-1") is None
+
+
+def test_slash_commands_work_inside_the_chat(home, tmp_path, monkeypatch):
+    """/keys, /doctor, `baton keys list` and a bare `exit` all run in the chat instead of
+    being sent to the model; /keys add reloads the pool without a restart."""
+    run_setup()
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    monkeypatch.setattr("baton.cli.main.is_interactive", lambda: True)
+    typed = ["/keys", "baton keys list", "/doctor", "/token", "/keys add", "openai_compatible",
+             "http://127.0.0.1:9/v1", "other-model", CREDENTIAL, "/keys frobnicate", "/status", "exit"]
+    result = runner.invoke(app, ["chat", "--workspace", str(workspace)], input="\n".join(typed) + "\n")
+    output = result.output
+    assert result.exit_code == 0, output
+    assert output.count("openai-compatible-1") >= 3                          # /keys, baton keys list, /status
+    assert "configuration is valid" in output                                # /doctor
+    assert "keys reloaded: 2 key(s)" in output                               # /keys add took effect live
+    assert "openai-compatible-2" in output
+    assert "Traceback" not in output and CREDENTIAL not in output
+
+
+def test_slash_dropdown_matches_only_slash_lines():
+    from baton.cli.ui import slash_matches
+
+    assert [name for name, _ in slash_matches("/")][:2] == ["/help", "/model"]
+    assert [name for name, _ in slash_matches("/keys a")] == ["/keys add"]
+    assert [name for name, _ in slash_matches("/UP")] == ["/update"]
+    assert slash_matches("hello") == [] and slash_matches("/zzz") == [] and slash_matches("/exit") == []
+
+
+def test_update_command_reports_up_to_date(home, monkeypatch):
+    from baton.cli import update as update_module
+
+    monkeypatch.setattr(update_module, "run_update", lambda: update_module.UpdateResult(True, "Already up to date."))
+    result = runner.invoke(app, ["update"])
+    assert result.exit_code == 0 and "Already up to date" in result.output and "Restart" not in result.output
+
+    monkeypatch.setattr(update_module, "run_update", lambda: update_module.UpdateResult(True, "Updated.", True))
+    assert "Restart Baton" in runner.invoke(app, ["update"]).output
+
+    monkeypatch.setattr(update_module, "run_update", lambda: update_module.UpdateResult(False, "git fetch failed"))
+    failed = runner.invoke(app, ["update"])
+    assert failed.exit_code == 1 and "git fetch failed" in failed.output
 
 
 def test_serve_refuses_to_expose_without_both_switches(home):
