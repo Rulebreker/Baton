@@ -39,7 +39,7 @@ Requires Python 3.10 or newer and git.
 **Windows (PowerShell)**
 
 ```powershell
-git clone https://github.com/<your-account>/Baton.git
+git clone https://github.com/Rulebreker/Baton.git
 cd Baton
 py -m venv .venv
 .\.venv\Scripts\Activate.ps1
@@ -54,7 +54,7 @@ If activation is blocked by the execution policy, run
 **Linux / macOS**
 
 ```bash
-git clone https://github.com/<your-account>/Baton.git
+git clone https://github.com/Rulebreker/Baton.git
 cd Baton
 python3 -m venv .venv
 source .venv/bin/activate

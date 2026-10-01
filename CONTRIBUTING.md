@@ -6,7 +6,7 @@ so stability and security come before features.
 ## Setup
 
 ```bash
-git clone https://github.com/<your-account>/Baton.git
+git clone https://github.com/Rulebreker/Baton.git
 cd Baton
 python -m venv .venv            # then activate it
 pip install -e ".[dev]"
