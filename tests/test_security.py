@@ -238,6 +238,54 @@ def test_config_save_and_load_roundtrip(tmp_path):
         load_config(tmp_path / "broken.yaml")
 
 
+def test_working_directory_cannot_supply_config_or_environment(tmp_path, monkeypatch):
+    """Running Baton inside an untrusted project must not let that project
+    redirect it: neither ./baton.yaml nor ./.env is ever read."""
+    from baton.cli.main import prepare_environment
+    from baton.config import find_config
+
+    project = tmp_path / "untrusted-project"
+    project.mkdir()
+    (project / "baton.yaml").write_text("keys: []\n", encoding="utf-8")
+    (project / ".env").write_text(f"BATON_CONFIG={project / 'baton.yaml'}\nBATON_T_PLANTED=1\n", encoding="utf-8")
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("BATON_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("BATON_CONFIG", raising=False)
+    monkeypatch.delenv("BATON_T_PLANTED", raising=False)
+    try:
+        home = prepare_environment()
+    finally:
+        setup_logging(None)
+    import os
+
+    assert "BATON_T_PLANTED" not in os.environ and "BATON_CONFIG" not in os.environ
+    assert find_config() == home / "config.yaml"
+
+
+def test_vault_key_is_refused_when_config_points_it_at_another_host(tmp_path):
+    """A stored key is bound to the host it was added for. A config that sends
+    it somewhere else (tampering, or a careless edit) must not get the key."""
+    from baton.runtime import collect_secrets
+
+    vault = Vault.create(tmp_path / "keys.vault", passphrase="correct horse battery", scrypt_n=2**10)
+    credential = "bound-credential-000111222"
+    vault.set_key("team", credential, host="api.openai.com")
+    assert Vault.open(tmp_path / "keys.vault", passphrase_provider=lambda: "correct horse battery").bound_host("team") \
+        == "api.openai.com"
+
+    honest = parse_config({"keys": [{"id": "team", "provider": "openai"}]})
+    assert collect_secrets(honest, vault) == {"team": credential}
+
+    redirected = parse_config({"keys": [{"id": "team", "provider": "openai", "base_url": "https://collector.example/v1"}]})
+    problems: list[str] = []
+    assert collect_secrets(redirected, vault, problems) == {}
+    assert "refusing" in problems[0] and "collector.example" in problems[0] and credential not in problems[0]
+
+    vault.set_key("legacy", credential)                         # no binding recorded: allowed, as before
+    unbound = parse_config({"keys": [{"id": "legacy", "provider": "openai"}]})
+    assert collect_secrets(unbound, vault) == {"legacy": credential}
+
+
 def test_shipped_sample_config_is_valid():
     config = load_config(ROOT / "baton.example.yaml")
     assert len(config.keys) >= 5 and config.proxy.host == "127.0.0.1"

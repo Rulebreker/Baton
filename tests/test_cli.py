@@ -106,6 +106,43 @@ def test_serve_refuses_to_expose_without_both_switches(home):
     assert flag_only.exit_code == 1 and "allow_remote" in flag_only.output
 
 
+def test_interactive_session_survives_slash_commands_and_a_failing_turn(home, tmp_path, monkeypatch):
+    """Drive the REPL: every slash command, then a turn whose upstream is
+    unreachable. The session must report the failure and keep running."""
+    assert run_init().exit_code == 0
+    config_file = home / "config.yaml"
+    # Fail fast instead of waiting for the unreachable upstream to "recover".
+    config_file.write_text(config_file.read_text(encoding="utf-8") + "rotation:\n  max_queue_wait: 0\n  connect_timeout: 2\n",
+                           encoding="utf-8")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    monkeypatch.setattr("baton.cli.main.is_interactive", lambda: True)
+    typed = ["/help", "/status", "/model fast", "/approval auto_edit", "/nonsense", "", "hello there", "/handoff",
+             "/clear", "/exit"]
+    result = runner.invoke(app, ["chat", "--workspace", str(workspace)], input="\n".join(typed) + "\n")
+
+    assert result.exit_code == 0, result.output
+    output = result.output
+    assert "Baton" in output and "/help for commands" in output          # banner
+    assert "Commands" in output and "openai-compatible-1" in output      # /help and /status
+    assert "model: fast" in output and "approval: auto_edit" in output
+    assert "unknown command" in output
+    assert "exhausted, rate-limited or unhealthy" in output              # the failing turn was reported...
+    assert "Your message was not sent" in output
+    assert "conversation cleared" in output                              # ...and the session carried on
+    assert "Traceback" not in output and CREDENTIAL not in output
+
+
+def test_one_shot_prompt_exits_nonzero_when_no_key_can_answer(home, tmp_path):
+    assert run_init().exit_code == 0
+    config_file = home / "config.yaml"
+    config_file.write_text(config_file.read_text(encoding="utf-8") + "rotation:\n  max_queue_wait: 0\n  connect_timeout: 2\n",
+                           encoding="utf-8")
+    result = runner.invoke(app, ["chat", "-p", "hello", "--workspace", str(tmp_path)])
+    assert result.exit_code == 1 and "exhausted" in result.output
+    assert runner.invoke(app, ["chat", "-p", "x", "--approval", "bogus"]).exit_code == 1
+
+
 def test_missing_setup_gives_actionable_errors(home):
     result = runner.invoke(app, ["status"])
     assert result.exit_code == 1 and "baton init" in result.output

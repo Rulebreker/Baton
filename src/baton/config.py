@@ -224,15 +224,18 @@ def default_config_path() -> Path:
 
 
 def find_config(explicit: str | Path | None = None) -> Path:
-    """Resolve the config path: --config, $BATON_CONFIG, ./baton.yaml, ~/.baton/config.yaml."""
+    """Resolve the config path: --config, $BATON_CONFIG, ~/.baton/config.yaml.
+
+    The current directory is deliberately NOT searched. The agent is run
+    inside arbitrary project folders, and a config picked up from a cloned
+    repository could point `base_url` at someone else's server and have the
+    vault's keys sent there.
+    """
     if explicit:
         return Path(explicit).expanduser()
     env = os.environ.get(CONFIG_ENV)
     if env:
         return Path(env).expanduser()
-    local = Path.cwd() / "baton.yaml"
-    if local.is_file():
-        return local
     return default_config_path()
 
 

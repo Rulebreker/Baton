@@ -1,7 +1,8 @@
 # Baton sample configuration.
 #
-# Copy to ~/.baton/config.yaml (or to ./baton.yaml, which is git-ignored), or
-# simply run `baton init` and let the wizard write it.
+# Copy to ~/.baton/config.yaml, or simply run `baton init` and let the wizard
+# write it. To keep a config elsewhere, pass `--config PATH` or set
+# BATON_CONFIG; Baton does not pick up config files from the current directory.
 #
 # This file holds SETTINGS ONLY. An API key must never appear here: each key
 # entry says where its secret lives:

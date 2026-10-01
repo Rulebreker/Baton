@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 import click
 import typer
@@ -60,13 +61,21 @@ def fail(message: str) -> None:
     raise typer.Exit(1)
 
 
+def is_interactive() -> bool:
+    """True when a person is at the keyboard (so prompts and approvals are possible)."""
+    return sys.stdin.isatty()
+
+
 def config_path(ctx: typer.Context) -> Path:
     return find_config((ctx.obj or {}).get("config"))
 
 
 def prepare_environment(*, console_logs: bool = False, level: str = "INFO") -> Path:
     home = ensure_private_dir(baton_home())
-    load_dotenv(Path.cwd() / ".env", home / ".env")
+    # Only Baton's own private directory is trusted as a source of settings. A
+    # `.env` in the working directory belongs to whatever project the agent is
+    # pointed at and must not be able to redirect Baton (BATON_CONFIG, ...).
+    load_dotenv(home / ".env")
     setup_logging(home / "logs", level=level, console=console_logs)
     return home
 
@@ -108,10 +117,13 @@ def build_runtime(ctx: typer.Context, *, console_logs: bool = False) -> Runtime:
     needs_vault = any(key.secret == "vault" for key in config.keys)
     vault = open_vault(home, required=needs_vault)
     try:
-        return Runtime.build(config, vault, home=home)
+        runtime = Runtime.build(config, vault, home=home)
     except BatonError as exc:
         fail(str(exc))
-    raise typer.Exit(1)
+        raise typer.Exit(1) from None
+    for problem in runtime.problems:
+        stderr.print(f"[yellow]warning:[/] {escape(scrub(problem))}")
+    return runtime
 
 
 def prompt_optional_int(label: str) -> int | None:
@@ -155,7 +167,7 @@ def add_key_interactive(config: BatonConfig, vault: Vault) -> KeyConfig | None:
         key = KeyConfig(id=key_id, provider=provider, base_url=base_url, models=[model], limits=limits)
         if config.key(key.id) is not None:
             raise ValueError(f"a key named '{key.id}' already exists")
-        vault.set_key(key.id, secret)
+        vault.set_key(key.id, secret, host=urlparse(str(key.base_url)).hostname)
     except (ValueError, VaultError) as exc:
         console.print(f"[red]Could not add key:[/] {escape(scrub(str(exc)))}")
         return None
@@ -582,7 +594,7 @@ def run_chat(ctx: typer.Context, model: str, workspace: Path | None, approval: s
         fail(f"workspace {root_dir} is not a directory")
 
     ui = TerminalUI(console, runtime.pool, show_handoffs=agent_config.show_handoffs)
-    interactive = prompt is None and sys.stdin.isatty()
+    interactive = prompt is None and is_interactive()
 
     async def approve(name: str, description: str) -> bool:
         if not interactive:
@@ -689,6 +701,10 @@ def run_chat(ctx: typer.Context, model: str, workspace: Path | None, approval: s
     finally:
         try:
             loop.run_until_complete(runtime.aclose())
+            # Finalise any stream generators abandoned by a cancelled or failed
+            # turn before the loop goes away (asyncio.run does this for us;
+            # a hand-driven loop must do it itself).
+            loop.run_until_complete(loop.shutdown_asyncgens())
         finally:
             loop.close()
 

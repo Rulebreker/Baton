@@ -119,6 +119,7 @@ class Vault:
         self._kdf = kdf
         self._data = data
         self._data.setdefault("keys", {})
+        self._data.setdefault("hosts", {})
         self._data.setdefault("tokens", {})
         self._register_secrets()
 
@@ -216,16 +217,30 @@ class Vault:
     def get_key(self, key_id: str) -> str | None:
         return self._data["keys"].get(key_id)
 
-    def set_key(self, key_id: str, secret: str) -> None:
+    def set_key(self, key_id: str, secret: str, *, host: str | None = None) -> None:
+        """Store a key, bound to the upstream `host` it is meant for.
+
+        The binding lives inside the encrypted vault, so editing the YAML
+        config cannot silently redirect a stored key to a different server
+        (see `runtime.collect_secrets`).
+        """
         secret = secret.strip()
         if not secret or any(ch.isspace() for ch in secret) or len(secret) > 4096:
             raise VaultError("API key is empty, contains whitespace, or is implausibly long")
         self._data["keys"][key_id] = secret
+        if host:
+            self._data["hosts"][key_id] = host.lower()
+        else:
+            self._data["hosts"].pop(key_id, None)
         get_redactor().register_secret(secret, f"key:{key_id}")
         self.save()
 
+    def bound_host(self, key_id: str) -> str | None:
+        return self._data["hosts"].get(key_id)
+
     def remove_key(self, key_id: str) -> bool:
         removed = self._data["keys"].pop(key_id, None) is not None
+        self._data["hosts"].pop(key_id, None)
         if removed:
             self.save()
         return removed

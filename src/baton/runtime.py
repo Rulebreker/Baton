@@ -6,8 +6,9 @@ import logging
 import os
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlparse
 
 import httpx
 
@@ -26,23 +27,42 @@ from .vault import Vault
 log = logging.getLogger("baton.runtime")
 
 
-def collect_secrets(config: BatonConfig, vault: Vault | None) -> dict[str, str]:
+def collect_secrets(config: BatonConfig, vault: Vault | None, problems: list[str] | None = None) -> dict[str, str]:
     """Resolve each key's secret from the vault or the environment.
 
     Every resolved secret is registered with the redactor *before* anything
-    else can log, so even an early failure cannot print a key.
+    else can log, so even an early failure cannot print a key. Human-readable
+    reasons for unusable keys are appended to `problems`.
     """
     redactor = get_redactor()
     secrets: dict[str, str] = {}
+    problems = problems if problems is not None else []
     for key in config.keys:
         if key.secret == "vault":
             value = vault.get_key(key.id) if vault is not None else None
+            bound = vault.bound_host(key.id) if vault is not None else None
+            actual = (urlparse(str(key.base_url)).hostname or "").lower()
+            if value and bound and bound != actual:
+                # The config now points this key at a different server than
+                # the one it was stored for. Refuse: this is exactly what a
+                # tampered config would do to steal the key.
+                redactor.register_secret(value, f"key:{key.id}")
+                problems.append(
+                    f"key '{key.id}' was stored for host {bound} but the config now points to {actual}; refusing "
+                    "to use it. If the change is intended, remove the key and add it again."
+                )
+                continue
         else:
             value = os.environ.get(key.secret.removeprefix("env:"))
         if value:
             value = value.strip()
             redactor.register_secret(value, f"key:{key.id}")
             secrets[key.id] = value
+        else:
+            source = "the vault" if key.secret == "vault" else f"environment variable {key.secret[4:]}"
+            problems.append(f"key '{key.id}' has no secret in {source}")
+    for problem in problems:
+        log.warning("%s", problem)
     return secrets
 
 
@@ -68,6 +88,8 @@ class Runtime:
     relay: Relay
     client: httpx.AsyncClient
     vault: Vault | None = None
+    # Why some configured keys were left out of the pool (shown by the CLI).
+    problems: list[str] = field(default_factory=list)
 
     @classmethod
     def build(
@@ -81,12 +103,10 @@ class Runtime:
         persist: bool = True,
     ) -> Runtime:
         get_redactor().pii = config.logging.redact_pii
-        secrets = collect_secrets(config, vault)
-        missing = [key.id for key in config.keys if key.id not in secrets]
-        if missing:
-            log.warning("no secret found for key(s): %s", ", ".join(missing))
+        problems: list[str] = []
+        secrets = collect_secrets(config, vault, problems)
         if config.keys and not secrets:
-            raise ConfigError("none of the configured keys has a secret available (vault entry or env variable)")
+            raise ConfigError("none of the configured keys is usable:\n  " + "\n  ".join(problems))
 
         if persist:
             ensure_private_dir(home)
@@ -104,7 +124,9 @@ class Runtime:
             checkpoint_dir=(home / "checkpoints") if persist else None,
         )
         relay = Relay(config, pool, router, handoff)
-        return cls(config, home, pool, router, handoff, relay, client, vault)
+        runtime = cls(config, home, pool, router, handoff, relay, client, vault)
+        runtime.problems = problems
+        return runtime
 
     async def aclose(self) -> None:
         self.pool.save(force=True)

@@ -156,8 +156,12 @@ Not implemented: embeddings, images, audio, the Responses API, and `n > 1`.
 ## Configuration
 
 Settings live in `~/.baton/config.yaml` (written by the wizard). Baton looks for, in order: `--config`,
-`$BATON_CONFIG`, `./baton.yaml`, `~/.baton/config.yaml`. See [`baton.example.yaml`](baton.example.yaml)
-for every option with comments, and [`.env.example`](.env.example) for the environment variables.
+`$BATON_CONFIG`, `~/.baton/config.yaml`. See [`baton.example.yaml`](baton.example.yaml) for every option
+with comments, and [`.env.example`](.env.example) for the environment variables, which Baton reads from
+`~/.baton/.env`.
+
+Baton never reads a config or `.env` from the current directory. The agent is run inside arbitrary
+project folders, and a file planted in a cloned repository must not be able to reconfigure it.
 
 The settings that matter most:
 
@@ -261,6 +265,7 @@ written for people who will change the code. If you add a feature, keep these pr
 | | leaked through logs, errors, summaries | Every loaded key is registered with a process-wide redactor. All log records (including third-party libraries' and tracebacks), error messages, handoff summaries, checkpoints and tool output pass through it. |
 | | leaked in URLs | Keys are sent in headers only (including Gemini, which is usually shown with `?key=`). Redirects are never followed. Plain-HTTP upstreams are refused unless they are loopback. |
 | | exfiltrated by the model | The agent cannot read `.env`, vaults, private keys or Baton's data directory; its shell has credential-like environment variables removed. |
+| | redirected by a tampered config | Config and `.env` are read only from Baton's private directory, never from the project being worked on. Each vault key is bound, inside the encrypted vault, to the host it was added for; if the config later points it elsewhere, Baton refuses to use it. |
 | Your quota (the proxy) | another machine using it | Binds to `127.0.0.1` by default. Listening elsewhere needs two switches and prints a warning. |
 | | another local user or a web page | Every request needs a Baton token (256 bits, stored only as a SHA-256 hash, compared in constant time). `Host` is checked to defeat DNS rebinding; requests carrying a browser `Origin` are refused unless allow-listed; wildcard CORS is rejected by the config loader. |
 | | abuse and guessing | Per-token rate limit, failed-auth lockout, body-size cap, strict request validation, an allow-list for pass-through parameters. |
